@@ -87,6 +87,23 @@ def main():
     # job report
     subparsers.add_parser("report", help="Generate analytics report")
 
+    # job scam-check
+    p_scam = subparsers.add_parser("scam-check", help="Check an opportunity for scam signals")
+    p_scam.add_argument("--name", required=True, help="Opportunity name")
+    p_scam.add_argument("--description", required=True, help="Opportunity description")
+
+    # job find
+    p_find = subparsers.add_parser("find", help="Find income opportunities from profile")
+    p_find.add_argument(
+        "--direction",
+        choices=["content", "freelance", "tool", "annotation", "training", "cross-border"],
+        help="Filter by opportunity category",
+    )
+
+    # job plan
+    p_plan = subparsers.add_parser("plan", help="Generate execution plan for an opportunity")
+    p_plan.add_argument("--opportunity", required=True, help="Name of the opportunity to plan")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -115,6 +132,9 @@ def _dispatch(args):
         "paste": _cmd_paste,
         "validate-pack": _cmd_validate_pack,
         "report": _cmd_report,
+        "scam-check": _cmd_scam_check,
+        "find": _cmd_find,
+        "plan": _cmd_plan,
     }
     handler = handlers.get(args.command)
     if handler:
@@ -167,7 +187,7 @@ def _cmd_init(args):
 
     state_path = root / ".job-state.json"
     if not state_path.exists():
-        state = {"jobs": {}, "active_rubric": "v0_student_internship", "rubric_history": []}
+        state = {"jobs": {}, "active_rubric": "v0_student_internship", "rubric_history": [], "opportunities": [], "active_opportunity": None, "lessons": []}
         state_path.write_text(json.dumps(state, indent=2) + "\n")
 
     print(f"Created directory structure at {root}")
@@ -697,6 +717,9 @@ def _cmd_queue(args):
         ("Submitted — waiting 3d retro", "waiting_3d"),
         ("Submitted — waiting 14d retro", "waiting_14d"),
         ("Submitted — waiting 30d retro", "waiting_30d"),
+        ("Opportunity — candidate", "opp_candidate"),
+        ("Opportunity — verifying", "opp_verifying"),
+        ("Opportunity — planning", "opp_planning"),
     ]
 
     has_any = False
@@ -839,3 +862,125 @@ def _cmd_report(args):
     for line in md.split("\n"):
         if line.startswith("##"):
             print(line)
+
+
+def _cmd_scam_check(args):
+    from .scam_checker import check_opportunity
+
+    verdict = check_opportunity(args.name, args.description)
+
+    print(f"Scam check: {verdict.name}")
+    print(f"  Verdict: {verdict.verdict}")
+    print(f"  Red flags: {verdict.red_flags}")
+    print(f"  Suspect flags: {verdict.suspect_flags}")
+    print(f"  Reason: {verdict.reason}")
+    print(f"  Verify first step: {verdict.verify_first_step}")
+    print(f"  Income expectation: {verdict.income_expectation}")
+
+    if verdict.verdict in ("feasible", "suspect"):
+        root = _get_root()
+        state_path = root / ".job-state.json"
+        state = json.loads(state_path.read_text()) if state_path.exists() else {"jobs": {}, "opportunities": []}
+        opportunities = state.get("opportunities", [])
+        opp = {
+            "name": verdict.name,
+            "verdict": verdict.verdict,
+            "red_flags": verdict.red_flags,
+            "suspect_flags": verdict.suspect_flags,
+            "reason": verdict.reason,
+            "verify_first_step": verdict.verify_first_step,
+            "income_expectation": verdict.income_expectation,
+            "checked_at": verdict.checked_at,
+            "status": "candidate",
+        }
+        opportunities.append(opp)
+        state["opportunities"] = opportunities
+        state_path.write_text(json.dumps(state, indent=2) + "\n")
+        print(f"\n  Written to .job-state.json opportunities[]")
+
+
+def _cmd_find(args):
+    from .opportunity_finder import find_opportunities
+    from .profile_loader import load_profile
+
+    root = _get_root()
+    profile = load_profile(str(root))
+
+    direction = args.direction if args.direction else None
+    opportunities = find_opportunities(profile, direction)
+
+    if not opportunities:
+        print("No opportunities found for your profile.")
+        return
+
+    print(f"Found {len(opportunities)} opportunities:\n")
+    for i, opp in enumerate(opportunities, 1):
+        print(f"  {i}. {opp.name}")
+        print(f"     Category: {opp.category} | Tier: {opp.for_tier} | Verdict: {opp.verdict}")
+        print(f"     Money source: {opp.money_source}")
+        print(f"     Income: {opp.income_expectation}")
+        print()
+
+    # Write to state
+    state_path = root / ".job-state.json"
+    state = json.loads(state_path.read_text()) if state_path.exists() else {"jobs": {}, "opportunities": []}
+    existing = state.get("opportunities", [])
+    for opp in opportunities:
+        existing.append(opp.to_dict())
+    state["opportunities"] = existing
+    state_path.write_text(json.dumps(state, indent=2) + "\n")
+    print(f"Written {len(opportunities)} opportunities to .job-state.json")
+
+
+def _cmd_plan(args):
+    from .action_planner import create_plan
+    from .profile_loader import load_profile
+
+    root = _get_root()
+    state_path = root / ".job-state.json"
+    if not state_path.exists():
+        print("Error: No .job-state.json found. Run init first.", file=sys.stderr)
+        sys.exit(1)
+
+    state = json.loads(state_path.read_text())
+    opportunities = state.get("opportunities", [])
+
+    target = None
+    for opp in opportunities:
+        if opp.get("name") == args.opportunity:
+            target = opp
+            break
+
+    if target is None:
+        print(f"Error: Opportunity '{args.opportunity}' not found in .job-state.json", file=sys.stderr)
+        print("Available opportunities:", file=sys.stderr)
+        for opp in opportunities:
+            print(f"  - {opp.get('name', '?')}", file=sys.stderr)
+        sys.exit(1)
+
+    profile = load_profile(str(root))
+    plan = create_plan(target, profile)
+
+    print(f"Action Plan for: {plan.opportunity_name}")
+    print(f"\n1. Verification First Step:")
+    print(f"   {plan.verification_first_step}")
+    print(f"\n2. Two-Week Checklist:")
+    for item in plan.two_week_checklist:
+        print(f"   - {item}")
+    print(f"\n3. Income Expectation:")
+    print(f"   {plan.income_expectation}")
+    print(f"\n4. Stop-Loss Line:")
+    print(f"   {plan.stop_loss_line}")
+    print(f"\n5. AI Leverage Points:")
+    for point in plan.ai_leverage_points:
+        print(f"   - {point}")
+
+    if plan.warnings:
+        print(f"\nWarnings:")
+        for w in plan.warnings:
+            print(f"   ! {w}")
+
+    # Write plan to state
+    state["active_opportunity"] = plan.to_dict()
+    state_path.write_text(json.dumps(state, indent=2) + "\n")
+    print(f"\nPlan written to .job-state.json active_opportunity")

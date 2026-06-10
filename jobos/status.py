@@ -147,6 +147,40 @@ def _build_status_md(
     # -- Predictions & packs (filesystem counts) --
     pred_count = _count_predictions(state_dir)
     pack_count = _count_packs(state_dir)
+
+    # -- Opportunities --
+    opportunities = state.get("opportunities", [])
+    if opportunities:
+        lines.append("## Opportunities")
+        lines.append("")
+        # Group by verdict
+        by_verdict: Dict[str, List[Dict[str, Any]]] = {}
+        for opp in opportunities:
+            v = opp.get("verdict", "unknown")
+            by_verdict.setdefault(v, []).append(opp)
+        for verdict in ("feasible", "clean", "suspect", "high-risk", "scam", "unknown"):
+            opps = by_verdict.get(verdict, [])
+            if opps:
+                opp_rows = [
+                    [opp.get("category", "?"), opp.get("name", "?"), opp.get("verdict", "?"), opp.get("status", "candidate")]
+                    for opp in opps
+                ]
+                lines.append(_render_table(["Category", "Name", "Verdict", "Status"], opp_rows))
+                lines.append("")
+
+    # -- Active opportunity --
+    active_opp = state.get("active_opportunity")
+    if active_opp:
+        lines.append("## Active Opportunity")
+        lines.append("")
+        if isinstance(active_opp, dict):
+            name = active_opp.get("opportunity_name", active_opp.get("name", "?"))
+            lines.append(f"- **Name:** {name}")
+            if active_opp.get("verification_first_step"):
+                lines.append(f"- **Next step:** {active_opp['verification_first_step']}")
+            if active_opp.get("expected_income_range"):
+                lines.append(f"- **Income range:** {active_opp['expected_income_range']}")
+        lines.append("")
     if pred_count or pack_count:
         lines.append("## Artifacts")
         lines.append("")

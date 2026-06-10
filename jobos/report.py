@@ -30,7 +30,7 @@ STAGES = ["imported", "scored", "predicted", "packed", "submitted"]
 def _load_state(state_dir: Path) -> Dict[str, Any]:
     path = state_dir / ".job-state.json"
     if not path.exists():
-        return {"jobs": {}, "active_rubric": "unknown", "rubric_history": []}
+        return {"jobs": {}, "active_rubric": "unknown", "rubric_history": [], "opportunities": []}
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -329,6 +329,29 @@ def generate_report(state_dir: str | Path) -> str:
         ))
     else:
         lines.append("_All retros complete or no submitted jobs._")
+    lines.append("")
+
+    # -- Opportunity analysis ---------------------------------------------------
+    opportunities = state.get("opportunities", [])
+    lines.append("## Opportunity Analysis")
+    lines.append("")
+    if opportunities:
+        verdict_counts: Counter[str] = Counter()
+        for opp in opportunities:
+            verdict_counts[opp.get("verdict", "unknown")] += 1
+        lines.append(f"Total opportunities: **{len(opportunities)}**")
+        verdict_parts = [f"{v}={c}" for v, c in sorted(verdict_counts.items())]
+        lines.append(f"By verdict: {', '.join(verdict_parts)}")
+    else:
+        lines.append("Total opportunities: **0**")
+        lines.append("By verdict: n/a")
+
+    active_opp = state.get("active_opportunity")
+    if active_opp and isinstance(active_opp, dict):
+        name = active_opp.get("opportunity_name", active_opp.get("name", "none"))
+        lines.append(f"Active plan: **{name}**")
+    else:
+        lines.append("Active plan: _none_")
     lines.append("")
 
     md = "\n".join(lines)

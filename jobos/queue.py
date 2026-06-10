@@ -17,7 +17,7 @@ _STATE_FILENAME = ".job-state.json"
 def _load_state(state_dir: Path) -> Dict[str, Any]:
     path = state_dir / _STATE_FILENAME
     if not path.exists():
-        return {"jobs": {}, "active_rubric": "unknown", "rubric_history": []}
+        return {"jobs": {}, "active_rubric": "unknown", "rubric_history": [], "opportunities": []}
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -59,6 +59,9 @@ def get_queue(state_dir: str | Path) -> Dict[str, List[Dict[str, str]]]:
         "waiting_3d": [],
         "waiting_14d": [],
         "waiting_30d": [],
+        "opp_candidate": [],
+        "opp_verifying": [],
+        "opp_planning": [],
     }
 
     for job_id, job in state.get("jobs", {}).items():
@@ -80,5 +83,20 @@ def get_queue(state_dir: str | Path) -> Dict[str, List[Dict[str, str]]]:
                 buckets["waiting_14d"].append(_entry(job_id, job))
             if retro.get("status_30d") is None:
                 buckets["waiting_30d"].append(_entry(job_id, job))
+
+    for opp in state.get("opportunities", []):
+        opp_status = opp.get("status", "candidate")
+        opp_entry = {
+            "job_id": opp.get("id", opp.get("name", "?")),
+            "title": opp.get("name", ""),
+            "company": opp.get("category", ""),
+            "status": opp_status,
+        }
+        if opp_status == "candidate":
+            buckets["opp_candidate"].append(opp_entry)
+        elif opp_status == "verifying":
+            buckets["opp_verifying"].append(opp_entry)
+        elif opp_status == "planning":
+            buckets["opp_planning"].append(opp_entry)
 
     return buckets
