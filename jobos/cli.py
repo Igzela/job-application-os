@@ -124,6 +124,17 @@ def main():
     p_submit_cmd.add_argument("--port", type=int, default=9222, help="CDP port (default: 9222)")
     p_submit_cmd.add_argument("--headless", action="store_true", help="Run browser headless (standalone fallback only)")
 
+    # job auto-submit
+    p_auto = subparsers.add_parser("auto-submit", help="Auto-submit to BOSS Zhipin")
+    p_auto.add_argument("--job", help="Single job ID (omit for batch)")
+    p_auto.add_argument("--platform", default="boss")
+    p_auto.add_argument("--confirm", action="store_true", help="Actually send messages")
+    p_auto.add_argument("--port", type=int, default=9222)
+    p_auto.add_argument("--headless", action="store_true")
+    p_auto.add_argument("--max-jobs", type=int, default=5, help="Max jobs in batch mode")
+    p_auto.add_argument("--interval-min", type=int, default=30, help="Min seconds between submissions")
+    p_auto.add_argument("--interval-max", type=int, default=120, help="Max seconds between submissions")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -158,6 +169,7 @@ def _dispatch(args):
         "boss-import": _cmd_boss_import,
         "submit": _cmd_submit,
         "retro-freeform": _cmd_retro_freeform,
+        "auto-submit": _cmd_auto_submit,
     }
     handler = handlers.get(args.command)
     if handler:
@@ -1072,6 +1084,92 @@ def _cmd_submit(args):
         print(f"  Screenshot: {result.screenshot_path}")
     if result.error:
         print(f"  Error: {result.error}", file=sys.stderr)
+
+
+def _cmd_auto_submit(args):
+    from .submitter import auto_submit_single, auto_submit_batch, _load_pack_files, _connect_browser
+
+    root = _get_root()
+    dry_run = not args.confirm
+    mode = "DRY RUN" if dry_run else "LIVE"
+
+    if args.job:
+        # Single job mode
+        job_id = args.job
+        state_path = root / ".job-state.json"
+        if not state_path.exists():
+            print("Error: No .job-state.json found. Run `job init` first.", file=sys.stderr)
+            sys.exit(1)
+
+        state = json.loads(state_path.read_text())
+        job_info = state.get("jobs", {}).get(job_id)
+        if not job_info:
+            print(f"Error: Job {job_id} not found in state.", file=sys.stderr)
+            sys.exit(1)
+
+        job_info["job_id"] = job_id
+        pack_files = _load_pack_files(root / "applications" / job_id)
+        if not pack_files:
+            print(f"Error: No application pack for {job_id}. Run `job pack` first.", file=sys.stderr)
+            sys.exit(1)
+
+        pw, browser, context, page = _connect_browser(args.port, args.headless)
+        try:
+            result = auto_submit_single(
+                page=page,
+                job_data=job_info,
+                pack_files=pack_files,
+                state_dir=str(root),
+                dry_run=dry_run,
+                confirm=args.confirm,
+            )
+        finally:
+            try:
+                browser.close()
+            except Exception:
+                pass
+            try:
+                pw.stop()
+            except Exception:
+                pass
+
+        print(f"Auto-submit [{mode}] for {job_id}:")
+        print(f"  Submitted: {result.submitted}")
+        if result.screenshot_path:
+            print(f"  Screenshot: {result.screenshot_path}")
+        if result.error:
+            print(f"  Error: {result.error}", file=sys.stderr)
+            sys.exit(1)
+
+    else:
+        # Batch mode
+        print(f"Auto-submit batch [{mode}]:")
+        print(f"  Max jobs: {args.max_jobs}")
+        print(f"  Interval: {args.interval_min}-{args.interval_max}s")
+
+        summary = auto_submit_batch(
+            state_dir=str(root),
+            cdp_port=args.port,
+            max_jobs=args.max_jobs,
+            interval_min=args.interval_min,
+            interval_max=args.interval_max,
+            dry_run=dry_run,
+            confirm=args.confirm,
+        )
+
+        print(f"\nBatch summary:")
+        print(f"  Attempted: {summary.total_attempted}")
+        print(f"  Succeeded: {summary.total_succeeded}")
+        print(f"  Failed: {summary.total_failed}")
+
+        for result in summary.results:
+            status = "OK" if not result.error else "FAIL"
+            print(f"  [{status}] {result.job_id}: {result.page_url or 'no url'}")
+
+        if summary.errors:
+            print(f"\nErrors:", file=sys.stderr)
+            for err in summary.errors:
+                print(f"  - {err}", file=sys.stderr)
 
 
 def _cmd_boss_import(args):
