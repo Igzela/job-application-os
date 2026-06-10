@@ -12,7 +12,7 @@ Hard gates (skip or penalize):
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Dict, List
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +61,65 @@ def _clamp(value: float, lo: float = 0.0, hi: float = 10.0) -> float:
     return max(lo, min(hi, value))
 
 
+def _extract_skill_names(profile: dict) -> set[str]:
+    """Extract all skill names from a profile, handling both flat list and nested YAML formats.
+
+    Flat format (tests): profile["skills"] = ["Python", "JavaScript", ...]
+    YAML format (real):  profile["skills"]["programming_languages"][0]["name"] = "Python"
+    """
+    raw = profile.get("skills", [])
+    names: set[str] = set()
+
+    if isinstance(raw, list):
+        # Flat list of strings
+        for item in raw:
+            if isinstance(item, str):
+                names.add(item)
+            elif isinstance(item, dict):
+                names.add(item.get("name", ""))
+    elif isinstance(raw, dict):
+        # Nested YAML: {programming_languages: [{name: "Python", ...}], frameworks: [...], domains: [...]}
+        for category in ("programming_languages", "frameworks", "domains", "tools"):
+            for entry in raw.get(category, []):
+                if isinstance(entry, dict):
+                    name = entry.get("name", "")
+                    if name:
+                        names.add(name)
+                    # Also add tools
+                    for tool in entry.get("tools", []):
+                        if tool:
+                            names.add(tool)
+                elif isinstance(entry, str):
+                    names.add(entry)
+
+    # Also pull from languages list
+    for lang in profile.get("languages", []):
+        if isinstance(lang, str):
+            names.add(lang)
+
+    return {n for n in names if n}
+
+
+def _extract_evidence_text(evidence: list[dict]) -> set[str]:
+    """Extract searchable keywords from evidence bank entries."""
+    kw: set[str] = set()
+    for item in evidence:
+        if isinstance(item, str):
+            kw |= _keywords_from(item)
+        elif isinstance(item, dict):
+            kw |= _keywords_from(item.get("description", ""))
+            kw |= _keywords_from(item.get("title", ""))
+            kw |= _keywords_from(item.get("content", ""))
+            for skill in item.get("skills", []):
+                kw |= _keywords_from(skill)
+            # Also search fields dict values
+            fields = item.get("fields", {})
+            if isinstance(fields, dict):
+                for v in fields.values():
+                    kw |= _keywords_from(str(v))
+    return kw
+
+
 # ---------------------------------------------------------------------------
 # Hard gates
 # ---------------------------------------------------------------------------
@@ -99,15 +158,39 @@ def _check_hard_gates(job_data: dict, profile: dict, rubric: dict) -> tuple[bool
                 penalties["risk"] = penalties.get("risk", 0) + 3.0
                 break
 
+    # Gate 2b: days-per-week conflict
+    avail_start = availability.get("start", profile.get("availability_start", ""))
+    avail_end = availability.get("end", profile.get("availability_end", ""))
+    profile_days = profile.get("days_per_week")
+    wa = availability.get("work_arrangement", profile.get("work_arrangement", {}))
+    weekly_cap = profile.get("weekly_capacity", {})
+    if not profile_days and weekly_cap:
+        profile_days = weekly_cap.get("days_per_week")
+
+    job_days = job_data.get("required_days_per_week")
+    if profile_days and job_days:
+        try:
+            if int(job_days) > int(profile_days):
+                penalties["risk"] = penalties.get("risk", 0) + 2.0
+        except (ValueError, TypeError):
+            pass
+
+    # Gate 2c: date window conflict
+    job_start = job_data.get("start_date", "")
+    job_duration = job_data.get("duration", "")
+    if avail_start and job_start and job_start > avail_end:
+        penalties["risk"] = penalties.get("risk", 0) + 3.0
+
     # Gate 3: missing required skill -> evidence penalty
     required_skills = rubric.get("required_skills", profile.get("required_skills", []))
     if required_skills:
-        candidate_skills = set()
-        for skill in profile.get("skills", []):
-            candidate_skills |= _keywords_from(skill)
+        candidate_skills = _extract_skill_names(profile)
+        candidate_kw: set[str] = set()
+        for s in candidate_skills:
+            candidate_kw |= _keywords_from(s)
         for req in required_skills:
             req_kw = _keywords_from(req)
-            if not req_kw & candidate_skills:
+            if not req_kw & candidate_kw:
                 penalties["evidence"] = penalties.get("evidence", 0) + 2.0
 
     return skip, penalties
@@ -133,9 +216,10 @@ def _score_fit(job_data: dict, profile: dict, rubric: dict) -> float:
     job_text = f"{job_data.get('title', '')} {job_data.get('description', '')}"
     job_kw = _keywords_from(job_text)
 
-    # Skill overlap
-    candidate_skills = set()
-    for skill in profile.get("skills", []):
+    # Skill overlap — handle both flat list and nested YAML
+    candidate_skill_names = _extract_skill_names(profile)
+    candidate_skills: set[str] = set()
+    for skill in candidate_skill_names:
         candidate_skills |= _keywords_from(skill)
     skill_score = _overlap(candidate_skills, job_kw) * 10
 
@@ -168,14 +252,13 @@ def _score_evidence(job_data: dict, profile: dict, rubric: dict) -> float:
     requirements = job_data.get("requirements", job_data.get("description", ""))
     req_kw = _keywords_from(requirements)
 
+    # Gather evidence keywords from both profile experience and evidence bank
     evidence_items = profile.get("experience", []) + profile.get("evidence", [])
-    evidence_kw = set()
-    for item in evidence_items:
-        if isinstance(item, str):
-            evidence_kw |= _keywords_from(item)
-        elif isinstance(item, dict):
-            evidence_kw |= _keywords_from(item.get("description", ""))
-            evidence_kw |= _keywords_from(item.get("title", ""))
+    evidence_kw = _extract_evidence_text(evidence_items)
+
+    # Also pull keywords from profile skill names
+    for skill_name in _extract_skill_names(profile):
+        evidence_kw |= _keywords_from(skill_name)
 
     overlap = _overlap(evidence_kw, req_kw)
     # Scale: 0 overlap -> 2, full overlap -> 10
@@ -317,6 +400,7 @@ def score_job(
     Args:
         job_data: Job posting data (title, description, company, location, etc.)
         profile: Candidate profile (skills, experience, preferences, etc.)
+            Handles both flat-list format (tests) and nested YAML format (real).
         evidence: List of evidence items (projects, achievements, references).
         rubric: Scoring rubric config (required_skills, target_roles, etc.)
 
@@ -326,6 +410,26 @@ def score_job(
     """
     # Merge evidence into profile for scorers
     merged_profile = {**profile, "evidence": evidence}
+
+    # Normalize availability: YAML has top-level keys, tests may nest under "availability"
+    if "availability" not in merged_profile:
+        merged_profile["availability"] = {}
+    avail = merged_profile["availability"]
+    # Pull from YAML top-level if availability dict is empty
+    if not avail.get("conflicts") and not avail.get("start"):
+        iw = profile.get("internship_window", {})
+        if iw:
+            avail.setdefault("start", iw.get("start", ""))
+            avail.setdefault("end", iw.get("end", ""))
+        wa = profile.get("work_arrangement", {})
+        if wa:
+            avail.setdefault("work_arrangement", wa)
+
+    # Normalize preferred_locations from YAML top-level
+    if "preferred_locations" not in merged_profile:
+        tl = profile.get("target_locations", [])
+        if tl:
+            merged_profile["preferred_locations"] = tl
 
     # Hard gates
     should_skip, penalties = _check_hard_gates(job_data, merged_profile, rubric)

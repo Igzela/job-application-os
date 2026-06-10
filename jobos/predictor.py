@@ -249,7 +249,9 @@ def create_prediction(
         job_id=job_id,
         created_at=datetime.now(timezone.utc).isoformat(),
         rubric_version=job_data.get("rubric_version", "v0"),
-        dimension_scores={k: v for k, v in scores.items() if k != "final_score"},
+        dimension_scores={k: v for k, v in scores.items()
+                         if k not in ("final_score", "skipped", "skip_reason", "penalties")
+                         and isinstance(v, (int, float))},
         final_score=round(final_score, 2),
         probabilities=probabilities,
         expected_best_outcome=best_outcome,

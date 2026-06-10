@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "job-application-os"
+version = "0.2.0"
+description = "Local-first job application copilot — dry-run / assist-only"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+dependencies = [
+    "pyyaml>=6.0",
+    "beautifulsoup4>=4.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.scripts]
+job = "jobos.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["jobos*"]

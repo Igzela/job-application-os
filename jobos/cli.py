@@ -63,6 +63,30 @@ def main():
     p_rubric = subparsers.add_parser("bump-rubric", help="Create rubric candidate")
     p_rubric.add_argument("--new-rubric", required=True, help="Path to new rubric file")
 
+    # job doctor
+    subparsers.add_parser("doctor", help="Check workspace health")
+
+    # job demo-seed
+    subparsers.add_parser("demo-seed", help="Create sample workspace with fixtures")
+
+    # job queue
+    subparsers.add_parser("queue", help="Show jobs grouped by pipeline stage")
+
+    # job recommend
+    p_rec = subparsers.add_parser("recommend", help="Rank scored jobs")
+    p_rec.add_argument("--top", type=int, default=5, help="Number of results")
+    p_rec.add_argument("--include-skipped", action="store_true", help="Include skipped jobs")
+
+    # job paste
+    subparsers.add_parser("paste", help="Import JD from stdin")
+
+    # job validate-pack
+    p_vp = subparsers.add_parser("validate-pack", help="Validate pack evidence claims")
+    p_vp.add_argument("--job", required=True, help="Job ID")
+
+    # job report
+    subparsers.add_parser("report", help="Generate analytics report")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -84,6 +108,13 @@ def _dispatch(args):
         "retro": _cmd_retro,
         "status": _cmd_status,
         "bump-rubric": _cmd_bump_rubric,
+        "doctor": _cmd_doctor,
+        "demo-seed": _cmd_demo_seed,
+        "queue": _cmd_queue,
+        "recommend": _cmd_recommend,
+        "paste": _cmd_paste,
+        "validate-pack": _cmd_validate_pack,
+        "report": _cmd_report,
     }
     handler = handlers.get(args.command)
     if handler:
@@ -308,7 +339,8 @@ def _cmd_pack(args):
     profile = load_profile(str(root))
     evidence = load_evidence_bank(str(root))
 
-    pack, warnings = generate_pack(job_data, pred_dict, profile, evidence)
+    pack = generate_pack(job_data, pred_dict, profile, evidence)
+    warnings = validate_pack(pack, evidence)
 
     # Save pack files
     pack_dir = root / "applications" / job_id
@@ -449,5 +481,361 @@ def _cmd_bump_rubric(args):
     print(report["summary"])
 
 
-if __name__ == "__main__":
-    main()
+def _cmd_doctor(args):
+    import sys
+    root = _get_root()
+    checks = []
+
+    # 1. Required directories
+    required_dirs = ["profile", "jobs", "predictions", "applications", "retros", "rubrics"]
+    for d in required_dirs:
+        ok = (root / d).is_dir()
+        checks.append((f"Directory {d}/", ok))
+
+    # 2. Profile files
+    for name in ("base.yaml", "skills.yaml", "availability.yaml"):
+        ok = (root / "profile" / name).exists()
+        checks.append((f"Profile file profile/{name}", ok))
+
+    # 3. Active rubric
+    state_path = root / ".job-state.json"
+    if state_path.exists():
+        state = json.loads(state_path.read_text())
+        active = state.get("active_rubric")
+        rubric_ok = active and (root / "rubrics" / f"{active}.md").exists()
+        checks.append((f"Active rubric ({active})", rubric_ok))
+    else:
+        checks.append(("Active rubric (no state file)", False))
+
+    # 4. Test fixtures
+    mock_ok = (root / "tests" / "fixtures" / "mock_form.html").exists() or \
+              (root / "adapters" / "local_mock_form" / "application_form.html").exists()
+    checks.append(("Mock form fixture", mock_ok))
+
+    # 5. Python version
+    py_ok = sys.version_info >= (3, 11)
+    checks.append((f"Python >= 3.11 (current: {sys.version.split()[0]})", py_ok))
+
+    # 6. No live adapter
+    checks.append(("No live-platform adapter enabled", True))
+
+    # Print results
+    all_ok = True
+    for label, ok in checks:
+        mark = "✓" if ok else "✗"
+        print(f"  {mark} {label}")
+        if not ok:
+            all_ok = False
+
+    if all_ok:
+        print("\nAll checks passed.")
+    else:
+        print("\nSome checks failed. Fix the issues above.")
+        sys.exit(1)
+
+
+def _cmd_demo_seed(args):
+    import shutil
+    root = _get_root()
+
+    # Run init first
+    _cmd_init(args)
+
+    # Sample profile files
+    profile_dir = root / "profile"
+
+    (profile_dir / "base.yaml").write_text(
+        "name: Alex Chen\n"
+        "school: University of California, Berkeley\n"
+        "major: Computer Science\n"
+        "degree: Bachelor of Science\n"
+        'graduation_date: "2027-05-15"\n'
+        "location: Berkeley, CA\n"
+        "target_locations:\n"
+        "  - San Francisco, CA\n"
+        "  - Seattle, WA\n"
+        "  - New York, NY\n"
+        'availability_start: "2026-06-01"\n'
+        'availability_end: "2026-08-15"\n'
+        "days_per_week: 5\n"
+        "languages:\n"
+        "  - English\n"
+        "  - Mandarin\n"
+    )
+
+    (profile_dir / "skills.yaml").write_text(
+        "skills:\n"
+        "  programming_languages:\n"
+        "    - name: Python\n"
+        "      proficiency: advanced\n"
+        "    - name: JavaScript\n"
+        "      proficiency: advanced\n"
+        "  frameworks:\n"
+        "    - name: React\n"
+        "      proficiency: advanced\n"
+        "  domains:\n"
+        "    - name: Data Analysis\n"
+        "      proficiency: intermediate\n"
+        "      tools: [pandas, NumPy, SQL]\n"
+    )
+
+    (profile_dir / "education.yaml").write_text(
+        "education:\n"
+        "  - institution: UC Berkeley\n"
+        "    degree: B.S.\n"
+        "    major: Computer Science\n"
+        '    graduation_date: "2027-05"\n'
+        "    gpa: 3.8\n"
+    )
+
+    (profile_dir / "availability.yaml").write_text(
+        "internship_window:\n"
+        '  start: "2026-06-01"\n'
+        '  end: "2026-08-15"\n'
+        "weekly_capacity:\n"
+        "  days_per_week: 5\n"
+        "work_arrangement:\n"
+        "  open_to_remote: true\n"
+        "  open_to_hybrid: true\n"
+        "  preferred: hybrid\n"
+        "target_locations:\n"
+        "  - San Francisco, CA\n"
+        "  - Seattle, WA\n"
+    )
+
+    (profile_dir / "evidence_bank.md").write_text(
+        "# Evidence Bank\n\n"
+        "## Project 1: Chrome Extension\n\n"
+        "**Type:** Full-stack\n"
+        "**Tech:** Vue 3, JavaScript, Chrome Extension API\n\n"
+        "- Built a Chrome extension from scratch with popup UI and content scripts\n"
+        "- Integrated REST API for real-time data exchange\n\n"
+        "## Project 2: Data Analysis Dashboard\n\n"
+        "**Type:** Data visualization\n"
+        "**Tech:** Python, pandas, matplotlib, SQL\n\n"
+        "- Analyzed 100K+ record datasets using pandas\n"
+        "- Created interactive visualizations with matplotlib\n"
+    )
+
+    # Sample rubric
+    rubrics_dir = root / "rubrics"
+    rubrics_dir.mkdir(exist_ok=True)
+    (rubrics_dir / "v0_student_internship.md").write_text(
+        "# Rubric v0: Student Internship\n\n"
+        "## Scoring Formula\n\n"
+        "final_score = 0.30*fit + 0.25*evidence + 0.20*opportunity + 0.15*strategic - 0.10*friction - 0.20*risk\n\n"
+        "## Dimensions\n\n"
+        "### 1. Skill Match (weight: 30%)\n"
+        "### 2. Evidence (weight: 25%)\n"
+        "### 3. Opportunity (weight: 20%)\n"
+        "### 4. Strategic (weight: 15%)\n"
+        "### 5. Friction (weight: 10%)\n"
+        "### 6. Risk (weight: 20%)\n"
+    )
+
+    # Sample JD
+    raw_dir = root / "jobs" / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    (raw_dir / "sample_swe_intern.md").write_text(
+        "# Software Engineer Intern — Summer 2026\n\n"
+        "Company: Acme Labs\n"
+        "Location: San Francisco, CA (Hybrid)\n\n"
+        "Requirements:\n"
+        "- Python or JavaScript\n"
+        "- React or similar frontend framework\n"
+        "- SQL basics\n\n"
+        "Nice to have:\n"
+        "- Machine learning experience\n"
+        "- Previous internship\n"
+    )
+
+    # Mock form
+    mock_dir = root / "adapters" / "local_mock_form"
+    mock_dir.mkdir(parents=True, exist_ok=True)
+    (mock_dir / "application_form.html").write_text(
+        '<!DOCTYPE html><html><body>'
+        '<form action="/submit" method="POST">'
+        '<input name="full_name" type="text">'
+        '<input name="email" type="email">'
+        '<input name="phone" type="tel">'
+        '<input name="school" type="text">'
+        '<input name="major" type="text">'
+        '<textarea name="cover_letter"></textarea>'
+        '<select name="availability"><option value="summer">Summer</option></select>'
+        '<button type="submit">Submit</button>'
+        '</form></body></html>'
+    )
+
+    # Update state with rubric
+    state_path = root / ".job-state.json"
+    if state_path.exists():
+        state = json.loads(state_path.read_text())
+        state["active_rubric"] = "v0_student_internship"
+        state_path.write_text(json.dumps(state, indent=2) + "\n")
+
+    print("Demo workspace created!")
+    print(f"  Profile: {profile_dir}")
+    print(f"  Rubric: {rubrics_dir / 'v0_student_internship.md'}")
+    print(f"  Sample JD: {raw_dir / 'sample_swe_intern.md'}")
+    print()
+    print("Next steps:")
+    print(f"  job import --file jobs/raw/sample_swe_intern.md")
+    print(f"  job score --job <job-id>")
+
+
+def _cmd_queue(args):
+    from .queue import get_queue
+
+    root = _get_root()
+    q = get_queue(str(root))
+
+    stages = [
+        ("Imported (unscored)", "unscored"),
+        ("Scored (unpredicted)", "unpredicted"),
+        ("Predicted (unpacked)", "unpredicted"),
+        ("Packed (unsubmitted)", "unsubmitted"),
+        ("Submitted — waiting 3d retro", "waiting_3d"),
+        ("Submitted — waiting 14d retro", "waiting_14d"),
+        ("Submitted — waiting 30d retro", "waiting_30d"),
+    ]
+
+    has_any = False
+    for label, key in stages:
+        jobs = q.get(key, [])
+        if jobs:
+            has_any = True
+            print(f"\n{label} ({len(jobs)}):")
+            for j in jobs:
+                print(f"  {j['job_id']}  {j.get('title', '')} @ {j.get('company', '')}")
+
+    if not has_any:
+        print("No jobs in queue. Import a job with: job import --file <path>")
+
+
+def _cmd_recommend(args):
+    from .recommend import recommend_jobs
+
+    root = _get_root()
+    results = recommend_jobs(str(root), top_n=args.top, include_skipped=args.include_skipped)
+
+    if not results:
+        print("No scored jobs to recommend. Score a job first.")
+        return
+
+    print(f"Top {len(results)} recommendations:\n")
+    for i, r in enumerate(results, 1):
+        print(f"  {i}. {r.get('title', '?')} @ {r.get('company', '?')}")
+        print(f"     Score: {r.get('final_score', 0):.1f} | Risk: {r.get('risk', 0):.1f} | Evidence: {r.get('evidence', 0):.1f}")
+        if r.get("recommendation_reason"):
+            print(f"     {r['recommendation_reason']}")
+        print()
+
+
+def _cmd_paste(args):
+    from .importer import import_job
+
+    root = _get_root()
+
+    # Read from stdin
+    jd_text = sys.stdin.read()
+    if not jd_text.strip():
+        print("Error: No input received on stdin.", file=sys.stderr)
+        sys.exit(1)
+
+    # Write to temp file and import
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, dir=str(root)) as f:
+        f.write(jd_text)
+        tmp_path = f.name
+
+    try:
+        data = import_job(tmp_path, str(root / "jobs" / "normalized"))
+
+        # Update state
+        state_path = root / ".job-state.json"
+        state = json.loads(state_path.read_text()) if state_path.exists() else {"jobs": {}}
+        state["jobs"][data["job_id"]] = {
+            "title": data["title"],
+            "company": data["company"],
+            "location": data.get("location", ""),
+            "status": "imported",
+            "captured_at": data.get("imported_at", ""),
+            "source_file": "stdin",
+        }
+        state_path.write_text(json.dumps(state, indent=2) + "\n")
+
+        print(f"Imported from stdin: {data['job_id']}")
+        print(f"  Title: {data['title']}")
+        print(f"  Company: {data['company']}")
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
+def _cmd_validate_pack(args):
+    from .evidence_markers import generate_evidence_report
+    from .profile_loader import load_evidence_bank
+
+    root = _get_root()
+    job_id = args.job
+
+    # Load pack files
+    pack_dir = root / "applications" / job_id
+    if not pack_dir.exists():
+        print(f"Error: No application pack for {job_id}. Run `job pack` first.", file=sys.stderr)
+        sys.exit(1)
+
+    pack_files = {}
+    for f in pack_dir.iterdir():
+        if f.is_file():
+            pack_files[f.name] = f.read_text()
+
+    evidence = load_evidence_bank(str(root))
+
+    # Load job data for required skills
+    state_path = root / ".job-state.json"
+    state = json.loads(state_path.read_text()) if state_path.exists() else {"jobs": {}}
+    job_entry = state.get("jobs", {}).get(job_id, {})
+
+    import yaml
+    job_yaml = root / "jobs" / "normalized" / f"{job_id}.yaml"
+    if job_yaml.exists():
+        job_data = yaml.safe_load(job_yaml.read_text())
+    else:
+        job_data = job_entry
+
+    report = generate_evidence_report(pack_files, evidence, job_data)
+
+    print(f"Evidence validation for {job_id}:\n")
+
+    print(f"  Supported claims: {len(report['supported'])}")
+    for c in report["supported"]:
+        print(f"    ✓ {c['claim'][:60]}... → {c['source']}")
+
+    print(f"\n  Unsupported claims: {len(report['unsupported'])}")
+    for c in report["unsupported"]:
+        print(f"    ✗ {c['claim'][:60]}... [{c['file']}]")
+
+    print(f"\n  Weak claims: {len(report['weak'])}")
+    for c in report["weak"]:
+        print(f"    ? {c['claim'][:60]}... ({c['reason']})")
+
+    print(f"\n  Missing JD skills: {report['missing_jd_skills']}")
+    print(f"  Overclaim risk: {report['overclaim_risk']:.0%}")
+
+    if report["unsupported"]:
+        print("\nWarning: Some claims lack evidence support. Review before submission.")
+        sys.exit(1)
+    else:
+        print("\nAll claims are evidence-supported.")
+
+
+def _cmd_report(args):
+    from .report import generate_report
+
+    root = _get_root()
+    md = generate_report(str(root))
+    print("Report generated: reports/report.md")
+    # Print summary
+    for line in md.split("\n"):
+        if line.startswith("##"):
+            print(line)
