@@ -1,12 +1,13 @@
 """Tests for the semi-automatic submitter module.
 
 Verifies prepare_submission, submit_application, platform field mapping,
-dry-run mode, and error handling.
+dry-run mode with browser interaction, and error handling.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
 
@@ -40,6 +41,42 @@ def _make_pack_dir(base: Path, job_id: str, files: dict[str, str] | None = None)
     return app_dir
 
 
+def _mock_browser_env():
+    """Return mocked (pw, browser, context, page) tuple."""
+    pw = MagicMock()
+    browser = MagicMock()
+    context = MagicMock()
+    page = MagicMock()
+
+    page.title.return_value = "BOSS Zhipin - Job Search"
+    page.url = "https://www.zhipin.com/"
+    page.screenshot.return_value = None
+
+    context.pages = [page]
+    pw.chromium.connect_over_cdp.return_value = browser
+    browser.contexts = [context]
+
+    return pw, browser, context, page
+
+
+def _mock_standalone_env():
+    """Return mocked standalone launch tuple."""
+    pw = MagicMock()
+    browser = MagicMock()
+    context = MagicMock()
+    page = MagicMock()
+
+    page.title.return_value = "BOSS Zhipin - Job Search"
+    page.url = "https://www.zhipin.com/"
+    page.screenshot.return_value = None
+
+    pw.chromium.launch.return_value = browser
+    browser.new_context.return_value = context
+    context.new_page.return_value = page
+
+    return pw, browser, context, page
+
+
 # ---------------------------------------------------------------------------
 # Tests: platform field mapping
 # ---------------------------------------------------------------------------
@@ -54,10 +91,10 @@ class TestPlatformMapping:
 
     def test_boss_map_values(self) -> None:
         """Boss map values are the expected Chinese form field names."""
-        assert BOSS_FIELD_MAP["greeting.md"] == "开场白/招呼语"
-        assert BOSS_FIELD_MAP["resume_targeted.md"] == "简历内容"
+        assert BOSS_FIELD_MAP["greeting.md"] == "招呼语"
+        assert BOSS_FIELD_MAP["resume_targeted.md"] == "简历"
         assert BOSS_FIELD_MAP["cover_letter.md"] == "求职信"
-        assert BOSS_FIELD_MAP["form_answers.md"] == "常见问题回答"
+        assert BOSS_FIELD_MAP["form_answers.md"] == "附加信息"
 
     def test_get_platform_fields_boss(self) -> None:
         result = get_platform_fields("boss")
@@ -92,11 +129,11 @@ class TestPrepareSubmission:
         _make_pack_dir(tmp_path, "job-002")
         result = prepare_submission("job-002", "boss", str(tmp_path))
 
-        assert "开场白/招呼语" in result.fields_filled
-        assert "简历内容" in result.fields_filled
+        assert "招呼语" in result.fields_filled
+        assert "简历" in result.fields_filled
         assert "求职信" in result.fields_filled
-        assert "常见问题回答" in result.fields_filled
-        assert "interested" in result.fields_filled["开场白/招呼语"]
+        assert "附加信息" in result.fields_filled
+        assert "interested" in result.fields_filled["招呼语"]
 
     def test_missing_pack_dir_raises(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError, match="No application pack found"):
@@ -111,7 +148,7 @@ class TestPrepareSubmission:
         result = prepare_submission("job-003", "boss", str(tmp_path))
 
         assert len(result.fields_filled) == 1
-        assert result.fields_filled["开场白/招呼语"] == "Hi there!"
+        assert result.fields_filled["招呼语"] == "Hi there!"
 
     def test_unknown_platform_raises(self, tmp_path: Path) -> None:
         _make_pack_dir(tmp_path, "job-004")
@@ -131,16 +168,24 @@ class TestPrepareSubmission:
 class TestSubmitApplication:
     """submit_application dry-run and error paths."""
 
-    def test_dry_run_default(self, tmp_path: Path) -> None:
+    @patch("jobos.browser.sync_playwright")
+    def test_dry_run_default(self, mock_pw_cls, tmp_path: Path) -> None:
+        pw, browser, context, page = _mock_standalone_env()
+        mock_pw_cls.return_value.start.return_value = pw
+
         _make_pack_dir(tmp_path, "job-010")
-        result = submit_application("job-010", "boss", str(tmp_path))
+        result = submit_application("job-010", "boss", str(tmp_path), cdp_port=None)
 
         assert result.dry_run is True
         assert len(result.fields_filled) == 4
 
-    def test_dry_run_explicit(self, tmp_path: Path) -> None:
+    @patch("jobos.browser.sync_playwright")
+    def test_dry_run_explicit(self, mock_pw_cls, tmp_path: Path) -> None:
+        pw, browser, context, page = _mock_standalone_env()
+        mock_pw_cls.return_value.start.return_value = pw
+
         _make_pack_dir(tmp_path, "job-011")
-        result = submit_application("job-011", "boss", str(tmp_path), dry_run=True)
+        result = submit_application("job-011", "boss", str(tmp_path), dry_run=True, cdp_port=None)
         assert result.dry_run is True
 
     def test_no_confirm_raises_value_error(self, tmp_path: Path) -> None:
@@ -148,14 +193,119 @@ class TestSubmitApplication:
         with pytest.raises(ValueError, match="--confirm"):
             submit_application("job-012", "boss", str(tmp_path), dry_run=False, confirm=False)
 
-    def test_confirm_raises_not_implemented(self, tmp_path: Path) -> None:
+    @patch("jobos.browser.sync_playwright")
+    def test_confirm_fills_fields(self, mock_pw_cls, tmp_path: Path) -> None:
+        pw, browser, context, page = _mock_standalone_env()
+        mock_pw_cls.return_value.start.return_value = pw
+
         _make_pack_dir(tmp_path, "job-013")
-        with pytest.raises(NotImplementedError, match="not implemented"):
-            submit_application("job-013", "boss", str(tmp_path), dry_run=False, confirm=True)
+        result = submit_application(
+            "job-013", "boss", str(tmp_path),
+            dry_run=False, confirm=True, cdp_port=None,
+        )
+        assert result.dry_run is False
+        assert result.submitted is False  # click not enabled yet
+        assert result.page_title == "BOSS Zhipin - Job Search"
+        assert result.page_url == "https://www.zhipin.com/"
 
     def test_missing_pack_in_submit(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError):
             submit_application("missing", "boss", str(tmp_path))
+
+    @patch("jobos.browser.sync_playwright")
+    def test_dry_run_captures_screenshot(self, mock_pw_cls, tmp_path: Path) -> None:
+        pw, browser, context, page = _mock_standalone_env()
+        mock_pw_cls.return_value.start.return_value = pw
+
+        _make_pack_dir(tmp_path, "job-020")
+        result = submit_application("job-020", "boss", str(tmp_path), cdp_port=None)
+
+        assert result.screenshot_path is not None
+        assert "dry_run_screenshot.png" in result.screenshot_path
+        page.screenshot.assert_called_once()
+
+    @patch("jobos.browser.sync_playwright")
+    def test_dry_run_captures_page_title(self, mock_pw_cls, tmp_path: Path) -> None:
+        pw, browser, context, page = _mock_standalone_env()
+        page.title.return_value = "BOSS Zhipin - Search Results"
+        mock_pw_cls.return_value.start.return_value = pw
+
+        _make_pack_dir(tmp_path, "job-021")
+        result = submit_application("job-021", "boss", str(tmp_path), cdp_port=None)
+
+        assert result.page_title == "BOSS Zhipin - Search Results"
+
+    @patch("jobos.browser.sync_playwright")
+    def test_cdp_port_uses_connect_over_cdp(self, mock_pw_cls, tmp_path: Path) -> None:
+        pw, browser, context, page = _mock_browser_env()
+        mock_pw_cls.return_value.start.return_value = pw
+
+        _make_pack_dir(tmp_path, "job-022")
+        result = submit_application(
+            "job-022", "boss", str(tmp_path),
+            dry_run=True, cdp_port=9222,
+        )
+
+        pw.chromium.connect_over_cdp.assert_called_once_with("http://localhost:9222")
+        assert result.dry_run is True
+
+    @patch("jobos.browser.sync_playwright")
+    def test_standalone_mode_uses_launch(self, mock_pw_cls, tmp_path: Path) -> None:
+        pw, browser, context, page = _mock_standalone_env()
+        mock_pw_cls.return_value.start.return_value = pw
+
+        _make_pack_dir(tmp_path, "job-023")
+        result = submit_application("job-023", "boss", str(tmp_path), dry_run=True, cdp_port=None)
+
+        pw.chromium.launch.assert_called_once()
+        assert result.dry_run is True
+
+    @patch("jobos.browser.sync_playwright")
+    def test_browser_crash_returns_error(self, mock_pw_cls, tmp_path: Path) -> None:
+        mock_pw_cls.return_value.start.side_effect = RuntimeError("Browser crashed")
+
+        _make_pack_dir(tmp_path, "job-024")
+        result = submit_application("job-024", "boss", str(tmp_path), dry_run=True)
+
+        assert result.error is not None
+        assert "Browser crashed" in result.error
+
+    @patch("jobos.browser.sync_playwright")
+    def test_screenshot_path_format(self, mock_pw_cls, tmp_path: Path) -> None:
+        pw, browser, context, page = _mock_standalone_env()
+        mock_pw_cls.return_value.start.return_value = pw
+
+        _make_pack_dir(tmp_path, "job-025")
+        result = submit_application("job-025", "boss", str(tmp_path), cdp_port=None)
+
+        assert result.screenshot_path is not None
+        path = Path(result.screenshot_path)
+        assert path.name == "dry_run_screenshot.png"
+        assert "job-025" in str(path)
+
+    @patch("jobos.browser.sync_playwright")
+    def test_browser_cleanup_on_success(self, mock_pw_cls, tmp_path: Path) -> None:
+        pw, browser, context, page = _mock_standalone_env()
+        mock_pw_cls.return_value.start.return_value = pw
+
+        _make_pack_dir(tmp_path, "job-026")
+        submit_application("job-026", "boss", str(tmp_path), cdp_port=None)
+
+        browser.close.assert_called_once()
+        pw.stop.assert_called_once()
+
+    @patch("jobos.browser.sync_playwright")
+    def test_browser_cleanup_on_failure(self, mock_pw_cls, tmp_path: Path) -> None:
+        pw, browser, context, page = _mock_standalone_env()
+        page.goto.side_effect = TimeoutError("Navigation timeout")
+        mock_pw_cls.return_value.start.return_value = pw
+
+        _make_pack_dir(tmp_path, "job-027")
+        result = submit_application("job-027", "boss", str(tmp_path), cdp_port=None)
+
+        browser.close.assert_called_once()
+        pw.stop.assert_called_once()
+        assert result.error is not None
 
 
 # ---------------------------------------------------------------------------
@@ -182,3 +332,5 @@ class TestSubmitResult:
         assert r.submitted is False
         assert r.submitted_at is None
         assert r.error is None
+        assert r.page_title is None
+        assert r.page_url is None

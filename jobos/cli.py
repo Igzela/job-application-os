@@ -119,9 +119,10 @@ def main():
     # job submit
     p_submit_cmd = subparsers.add_parser("submit", help="Semi-automatic application submission")
     p_submit_cmd.add_argument("--job", required=True, help="Job ID")
-    p_submit_cmd.add_argument("--platform", required=True, help="Target platform (e.g. boss)")
-    p_submit_cmd.add_argument("--dry-run", action="store_true", default=True, help="Dry-run mode (default)")
-    p_submit_cmd.add_argument("--confirm", action="store_true", help="Confirm submission (required for non-dry-run)")
+    p_submit_cmd.add_argument("--platform", default="boss", help="Target platform (default: boss)")
+    p_submit_cmd.add_argument("--confirm", action="store_true", help="Enable real submission (default is dry-run)")
+    p_submit_cmd.add_argument("--port", type=int, default=9222, help="CDP port (default: 9222)")
+    p_submit_cmd.add_argument("--headless", action="store_true", help="Run browser headless (standalone fallback only)")
 
     args = parser.parse_args()
 
@@ -1037,15 +1038,17 @@ def _cmd_submit(args):
     root = _get_root()
     job_id = args.job
     platform = args.platform
-    is_dry_run = args.dry_run and not args.confirm
+    dry_run = not args.confirm
 
     try:
         result = submit_application(
             job_id=job_id,
             platform=platform,
             state_dir=str(root),
-            dry_run=is_dry_run,
+            dry_run=dry_run,
             confirm=args.confirm,
+            cdp_port=args.port,
+            headless=args.headless,
         )
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -1059,12 +1062,16 @@ def _cmd_submit(args):
 
     mode = "DRY RUN" if result.dry_run else "LIVE"
     print(f"Submit [{mode}] for {job_id} on {platform}:")
-    print(f"  Fields prepared: {len(result.fields_filled)}")
+    print(f"  Fields: {len(result.fields_filled)}")
     for field_name, value in result.fields_filled.items():
         preview = value[:60] + ("..." if len(value) > 60 else "")
         print(f"    {field_name}: {preview}")
-    if result.dry_run:
-        print("  Mode: DRY RUN — nothing submitted")
+    if result.page_title:
+        print(f"  Page title: {result.page_title}")
+    if result.screenshot_path:
+        print(f"  Screenshot: {result.screenshot_path}")
+    if result.error:
+        print(f"  Error: {result.error}", file=sys.stderr)
 
 
 def _cmd_boss_import(args):
