@@ -659,7 +659,7 @@ def _generate_form_answers(job_data: dict, profile: dict, evidence: list[dict]) 
     if preferred:
         lines.append(f"A: I prefer {preferred} but am open to other arrangements.\n")
     else:
-        lines.append("A: I'm flexible and open to remote, hybrid, or on-site arrangements.\n")
+        lines.append("A: TODO: Confirm work arrangement preference before submitting.\n")
 
     # Q: Location
     lines.append("**Q: Current location / willing to relocate?**")
@@ -682,7 +682,7 @@ def _generate_form_answers(job_data: dict, profile: dict, evidence: list[dict]) 
     if notice:
         lines.append(f"A: {notice}\n")
     else:
-        lines.append("A: At least 2 weeks.\n")
+        lines.append("A: TODO: Confirm notice period before submitting.\n")
 
     return "\n".join(lines)
 
@@ -734,7 +734,7 @@ def _generate_submit_checklist(job_data: dict, prediction: dict) -> str:
     lines.append(
         "Once all items are checked, run:\n"
         "```\n"
-        f"job mark-submitted {job_data.get('job_id', '<job_id>')}\n"
+        f"job mark-submitted --job {job_data.get('job_id', '<job_id>')} --channel <manual/channel>\n"
         "```\n"
     )
 
