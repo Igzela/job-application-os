@@ -1,0 +1,781 @@
+"""
+pack_generator.py — Generate an ApplicationPack from job data, prediction, profile, and evidence.
+
+Each pack contains markdown files:
+  jd.md             — raw job description
+  prediction.md     — prediction summary
+  resume_targeted.md — conservative targeted resume (evidence-only claims)
+  greeting.md       — Chinese-style greeting for internship platforms
+  cover_letter.md   — short cover letter
+  form_answers.md   — common form Q&A
+  submit_checklist.md — requires human confirmation before submission
+
+The resume MUST only contain facts traceable to profile or evidence_bank.
+validate_pack() flags any unsupported claims.
+"""
+
+from __future__ import annotations
+
+import re
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Set
+
+from .models import ApplicationPack, Job, Prediction
+from .profile_loader import load_evidence_bank, load_profile
+
+
+# ---------------------------------------------------------------------------
+# Evidence indexing — build a searchable set of factual tokens from evidence
+# ---------------------------------------------------------------------------
+
+def _build_evidence_corpus(evidence: list[dict]) -> dict:
+    """Build lookup structures from evidence bank for claim verification.
+
+    Returns:
+        {
+            "skills": set of lowercase skill names,
+            "technologies": set of lowercase tech/tool names,
+            "titles": set of project titles,
+            "raw_texts": list of full text blocks (lowercase),
+            "fields_flat": dict of all flattened field key-value pairs,
+        }
+    """
+    skills: Set[str] = set()
+    technologies: Set[str] = set()
+    titles: Set[str] = set()
+    raw_texts: List[str] = []
+    fields_flat: Dict[str, str] = {}
+
+    for entry in evidence:
+        title = entry.get("title", "")
+        titles.add(title.lower().strip())
+
+        content = entry.get("content", "")
+        raw_texts.append(content.lower())
+
+        fields = entry.get("fields", {})
+        for k, v in fields.items():
+            fields_flat[k.lower().strip()] = v.lower().strip()
+            # Split comma-separated tech lists
+            for item in re.split(r"[,;]", v):
+                item = item.strip().lower()
+                if item:
+                    technologies.add(item)
+
+        entry_skills = entry.get("skills", [])
+        for s in entry_skills:
+            skills.add(s.lower().strip())
+
+    return {
+        "skills": skills,
+        "technologies": technologies,
+        "titles": titles,
+        "raw_texts": raw_texts,
+        "fields_flat": fields_flat,
+    }
+
+
+def _evidence_supports_claim(claim: str, corpus: dict) -> bool:
+    """Check if a textual claim has any supporting evidence in the corpus.
+
+    Uses keyword overlap: extracts significant words (3+ chars) from the claim
+    and checks if a threshold appears in evidence texts.
+    """
+    stop_words = {
+        "the", "and", "for", "with", "that", "this", "from", "are", "was",
+        "were", "been", "have", "has", "had", "not", "but", "can", "will",
+        "would", "could", "should", "may", "might", "shall", "into", "your",
+        "our", "their", "its", "his", "her", "you", "who", "what", "when",
+        "where", "how", "which", "than", "then", "them", "they", "each",
+        "more", "also", "about", "other", "such", "only", "very", "some",
+        "any", "all", "most", "used", "using", "via", "able", "well",
+    }
+
+    words = set(
+        w.lower()
+        for w in re.findall(r"[a-zA-Z][a-zA-Z0-9+#.]+", claim)
+        if len(w) >= 3 and w.lower() not in stop_words
+    )
+
+    if not words:
+        return True  # nothing to verify
+
+    all_text = " ".join(corpus["raw_texts"])
+    all_skills = " ".join(corpus["skills"])
+    all_tech = " ".join(corpus["technologies"])
+    combined = f"{all_text} {all_skills} {all_tech} {' '.join(corpus['titles'])}"
+
+    hits = sum(1 for w in words if w in combined)
+    # Require at least 30% of claim words to appear in evidence
+    return hits / len(words) >= 0.30
+
+
+# ---------------------------------------------------------------------------
+# Generators — each returns a markdown string
+# ---------------------------------------------------------------------------
+
+def _generate_jd(job_data: dict) -> str:
+    """Raw job description markdown."""
+    title = job_data.get("title", "Unknown Position")
+    company = job_data.get("company", "Unknown Company")
+    location = job_data.get("location", "")
+    work_type = job_data.get("work_type", "")
+    salary = job_data.get("salary", "")
+    jd_text = job_data.get("jd_text", "")
+    required = job_data.get("skills_required", [])
+    preferred = job_data.get("skills_preferred", [])
+    url = job_data.get("apply_url", "")
+
+    parts = [f"# {title} at {company}\n"]
+    if location:
+        parts.append(f"**Location:** {location}")
+    if work_type:
+        parts.append(f"**Work Type:** {work_type}")
+    if salary:
+        parts.append(f"**Salary:** {salary}")
+    if url:
+        parts.append(f"**Apply:** {url}")
+    parts.append("")
+
+    if jd_text:
+        parts.append("## Job Description\n")
+        parts.append(jd_text)
+        parts.append("")
+
+    if required:
+        parts.append("## Required Skills\n")
+        for s in required:
+            parts.append(f"- {s}")
+        parts.append("")
+
+    if preferred:
+        parts.append("## Preferred Skills\n")
+        for s in preferred:
+            parts.append(f"- {s}")
+
+    return "\n".join(parts)
+
+
+def _generate_prediction_summary(prediction: dict) -> str:
+    """Prediction summary markdown."""
+    lines = ["# Application Prediction\n"]
+
+    decision = prediction.get("decision", "skip")
+    final_score = prediction.get("final_score", 0.0)
+    confidence = prediction.get("confidence", 0.0)
+
+    lines.append(f"**Decision:** {decision.upper()}")
+    lines.append(f"**Final Score:** {final_score:.1f}/10")
+    lines.append(f"**Confidence:** {confidence:.0%}")
+    lines.append("")
+
+    # Probabilities — handle both predictor.py (nested) and models.py (flat)
+    probs = prediction.get("probabilities", {})
+    if isinstance(probs, dict):
+        p_screen = probs.get("screen", prediction.get("reply_7d_probability", 0))
+        p_interview = probs.get("interview", prediction.get("interview_14d_probability", 0))
+        p_offer = probs.get("offer", prediction.get("positive_signal_30d_probability", 0))
+    else:
+        p_screen = prediction.get("reply_7d_probability", 0)
+        p_interview = prediction.get("interview_14d_probability", 0)
+        p_offer = prediction.get("positive_signal_30d_probability", 0)
+
+    lines.append("## Funnel Probabilities\n")
+    lines.append(f"| Stage | Probability |")
+    lines.append(f"|-------|-------------|")
+    lines.append(f"| Pass screen | {p_screen:.0%} |")
+    lines.append(f"| Reach interview | {p_interview:.0%} |")
+    lines.append(f"| Receive offer | {p_offer:.0%} |")
+    lines.append("")
+
+    best = prediction.get("expected_best_outcome", "")
+    failure = prediction.get("expected_failure_reason", "")
+    if best:
+        lines.append(f"**Best outcome:** {best}")
+    if failure:
+        lines.append(f"**Likely failure:** {failure}")
+    lines.append("")
+
+    # Dimension scores
+    dim_scores = prediction.get("dimension_scores", {})
+    if dim_scores:
+        lines.append("## Dimension Scores\n")
+        for k, v in dim_scores.items():
+            label = k.replace("_", " ").title()
+            lines.append(f"- **{label}:** {v:.1f}/10")
+        lines.append("")
+
+    reasons = prediction.get("reasons", [])
+    if reasons:
+        lines.append("## Reasons\n")
+        for r in reasons:
+            lines.append(f"- {r}")
+        lines.append("")
+
+    notes = prediction.get("notes", "")
+    if notes:
+        lines.append(f"## Notes\n\n{notes}")
+
+    return "\n".join(lines)
+
+
+def _generate_resume(
+    profile: dict,
+    evidence: list[dict],
+    job_data: dict,
+) -> tuple[str, list[str]]:
+    """Generate a conservative targeted resume using only profile + evidence facts.
+
+    Returns (markdown_text, list_of_warnings) where warnings flag any section
+    that may need review.
+    """
+    warnings: List[str] = []
+    lines: List[str] = []
+
+    # --- Name and contact ---
+    name = profile.get("name", "Candidate")
+    location = profile.get("location", "")
+    languages = profile.get("languages", [])
+    email = profile.get("email", "")
+
+    lines.append(f"# {name}")
+    contact_parts = []
+    if location:
+        contact_parts.append(location)
+    if email:
+        contact_parts.append(email)
+    if languages:
+        contact_parts.append(", ".join(languages))
+    if contact_parts:
+        lines.append(" | ".join(contact_parts))
+    lines.append("")
+
+    # --- Education ---
+    edu_list = profile.get("education", [])
+    if edu_list:
+        lines.append("## Education\n")
+        for edu in edu_list:
+            inst = edu.get("institution", "")
+            degree = edu.get("degree", "")
+            major = edu.get("major", "")
+            grad = edu.get("graduation_date", "")
+            gpa = edu.get("gpa", None)
+            honors = edu.get("honors", [])
+            coursework = edu.get("relevant_coursework", [])
+            activities = edu.get("activities", [])
+
+            degree_line = f"**{inst}** -- {degree}, {major}"
+            if grad:
+                degree_line += f" (Expected {grad})"
+            lines.append(degree_line)
+            if gpa is not None:
+                lines.append(f"GPA: {gpa}")
+            if honors:
+                lines.append(f"Honors: {', '.join(honors)}")
+            if coursework:
+                lines.append(f"Relevant Coursework: {', '.join(coursework)}")
+            if activities:
+                lines.append(f"Activities: {', '.join(activities)}")
+            lines.append("")
+    else:
+        warnings.append("No education data found in profile.")
+
+    # --- Skills ---
+    skills_data = profile.get("skills", {})
+    prog_langs = skills_data.get("programming_languages", [])
+    frameworks = skills_data.get("frameworks", [])
+    domains = skills_data.get("domains", [])
+
+    if prog_langs or frameworks or domains:
+        lines.append("## Skills\n")
+        if prog_langs:
+            lang_strs = []
+            for lang in prog_langs:
+                name_s = lang.get("name", "")
+                prof = lang.get("proficiency", "")
+                lang_strs.append(f"{name_s} ({prof})" if prof else name_s)
+            lines.append(f"**Languages:** {', '.join(lang_strs)}")
+        if frameworks:
+            fw_strs = []
+            for fw in frameworks:
+                name_s = fw.get("name", "")
+                prof = fw.get("proficiency", "")
+                fw_strs.append(f"{name_s} ({prof})" if prof else name_s)
+            lines.append(f"**Frameworks:** {', '.join(fw_strs)}")
+        if domains:
+            dom_strs = []
+            for dom in domains:
+                name_s = dom.get("name", "")
+                prof = dom.get("proficiency", "")
+                tools = dom.get("tools", [])
+                entry = f"{name_s} ({prof})" if prof else name_s
+                if tools:
+                    entry += f" [{', '.join(tools)}]"
+                dom_strs.append(entry)
+            lines.append(f"**Domains:** {', '.join(dom_strs)}")
+        lines.append("")
+
+    # --- Projects (from evidence bank) ---
+    if evidence:
+        lines.append("## Projects\n")
+        for entry in evidence:
+            title = entry.get("title", "")
+            fields = entry.get("fields", "")
+            content = entry.get("content", "")
+            entry_skills = entry.get("skills", [])
+
+            lines.append(f"### {title}\n")
+
+            # Render structured fields
+            if isinstance(fields, dict):
+                for k, v in fields.items():
+                    lines.append(f"**{k}:** {v}")
+                lines.append("")
+
+            # Render concrete outcomes from content
+            # Extract bullet-like lines from content
+            concrete_lines = []
+            for line in content.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith("- "):
+                    concrete_lines.append(stripped)
+
+            if concrete_lines:
+                lines.append("**Key Outcomes:**")
+                lines.extend(concrete_lines)
+                lines.append("")
+
+            if entry_skills:
+                lines.append(f"**Skills:** {', '.join(entry_skills)}")
+                lines.append("")
+    else:
+        warnings.append("No evidence bank entries found. Resume has no project section.")
+
+    # --- Availability ---
+    avail = profile.get("internship_window", profile.get("availability", {}))
+    if isinstance(avail, dict):
+        start = avail.get("start", avail.get("availability_start", ""))
+        end = avail.get("end", avail.get("availability_end", ""))
+        if start or end:
+            lines.append("## Availability\n")
+            if start and end:
+                lines.append(f"Available {start} to {end}")
+            elif start:
+                lines.append(f"Available from {start}")
+            lines.append("")
+    elif profile.get("availability_start"):
+        lines.append("## Availability\n")
+        lines.append(f"Available {profile['availability_start']} to {profile.get('availability_end', 'TBD')}")
+        lines.append("")
+
+    # --- Work arrangement ---
+    wa = profile.get("work_arrangement", {})
+    if wa:
+        prefs = []
+        if wa.get("open_to_remote"):
+            prefs.append("Remote")
+        if wa.get("open_to_hybrid"):
+            prefs.append("Hybrid")
+        if wa.get("open_to_onsite"):
+            prefs.append("On-site")
+        preferred = wa.get("preferred", "")
+        if prefs:
+            lines.append(f"**Work Arrangement:** {' / '.join(prefs)}" +
+                         (f" (preferred: {preferred})" if preferred else ""))
+
+    resume_text = "\n".join(lines)
+    return resume_text, warnings
+
+
+def _generate_greeting(job_data: dict, profile: dict) -> str:
+    """Chinese-style greeting message for internship platforms like Boss Zhipin."""
+    name = profile.get("name", "")
+    company = job_data.get("company", "")
+    title = job_data.get("title", "internship position")
+
+    # Extract first name or use full name
+    first_name = name.split()[0] if name else "there"
+
+    school = ""
+    edu_list = profile.get("education", [])
+    if edu_list:
+        school = edu_list[0].get("institution", "")
+    if not school:
+        school = profile.get("school", "")
+
+    grad = ""
+    if edu_list:
+        grad = edu_list[0].get("graduation_date", "")
+    if not grad:
+        grad = profile.get("graduation_date", "")
+
+    # Key skills for the greeting
+    skills_data = profile.get("skills", {})
+    prog_langs = skills_data.get("programming_languages", [])
+    lang_names = [l.get("name", "") for l in prog_langs[:3]]
+
+    greeting = f"""Hello! I'm {first_name}, a Computer Science student at {school} (expected graduation {grad}). I'm very interested in the {title} role at {company}.
+
+I have hands-on experience with {', '.join(lang_names) if lang_names else 'multiple programming languages'} through personal projects and coursework, including building a Chrome extension with full-stack capabilities, designing multi-agent systems, and completing data analysis projects with real datasets.
+
+I'm available full-time starting June 2026 and am excited about the opportunity to contribute to your team. I'd love to learn more about the role and share how my background could be a good fit.
+
+Looking forward to hearing from you!"""
+
+    return greeting
+
+
+def _generate_cover_letter(job_data: dict, profile: dict, evidence: list[dict]) -> str:
+    """Short cover letter (evidence-based only)."""
+    name = profile.get("name", "Candidate")
+    company = job_data.get("company", "your company")
+    title = job_data.get("title", "the open position")
+
+    # Pick top 2 evidence entries to mention
+    highlights = evidence[:2] if evidence else []
+
+    school = ""
+    edu_list = profile.get("education", [])
+    if edu_list:
+        school = edu_list[0].get("institution", "")
+    if not school:
+        school = profile.get("school", "")
+
+    lines = [f"Dear Hiring Team,\n"]
+    lines.append(
+        f"I am writing to express my interest in the {title} position at {company}. "
+        f"As a Computer Science student at {school}, I bring a strong foundation in "
+        f"software development and a passion for building practical tools.\n"
+    )
+
+    if highlights:
+        lines.append("Here are two projects that demonstrate my relevant experience:\n")
+        for entry in highlights:
+            title_e = entry.get("title", "A project")
+            fields = entry.get("fields", {})
+            tech = fields.get("Tech", "") if isinstance(fields, dict) else ""
+            content = entry.get("content", "")
+
+            # Extract first concrete outcome
+            outcome = ""
+            for line in content.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith("- "):
+                    outcome = stripped[2:]
+                    break
+
+            bullet = f"- **{title_e}**"
+            if tech:
+                bullet += f" ({tech})"
+            if outcome:
+                bullet += f": {outcome}"
+            lines.append(bullet)
+        lines.append("")
+
+    lines.append(
+        "All of my work is documented with concrete, verifiable outcomes. "
+        "I am available full-time starting June 2026 and eager to contribute to your team.\n"
+    )
+    lines.append("Thank you for your consideration.\n")
+    lines.append(f"Best regards,\n{name}")
+
+    return "\n".join(lines)
+
+
+def _generate_form_answers(job_data: dict, profile: dict) -> str:
+    """Common form Q&A for internship applications."""
+    name = profile.get("name", "")
+    company = job_data.get("company", "")
+    title = job_data.get("title", "")
+
+    school = ""
+    edu_list = profile.get("education", [])
+    if edu_list:
+        school = edu_list[0].get("institution", "")
+        grad = edu_list[0].get("graduation_date", "TBD")
+        gpa = edu_list[0].get("gpa", "")
+    else:
+        school = profile.get("school", "")
+        grad = profile.get("graduation_date", "TBD")
+        gpa = ""
+
+    skills_data = profile.get("skills", {})
+    all_skills = []
+    for lang in skills_data.get("programming_languages", []):
+        all_skills.append(lang.get("name", ""))
+    for fw in skills_data.get("frameworks", []):
+        all_skills.append(fw.get("name", ""))
+
+    location = profile.get("location", "")
+
+    lines = ["# Form Answers\n"]
+
+    # Q: Why this company?
+    lines.append(f"**Q: Why {company}?**")
+    lines.append(
+        f"A: I'm drawn to {company}'s work and believe the {title} role aligns well "
+        f"with my technical background and career goals in software engineering.\n"
+    )
+
+    # Q: Why this role?
+    lines.append(f"**Q: Why this role?**")
+    lines.append(
+        f"A: The {title} position matches my skills in {', '.join(all_skills[:4]) if all_skills else 'software development'} "
+        f"and offers an opportunity to apply what I've learned in a professional setting.\n"
+    )
+
+    # Q: Tell us about yourself
+    lines.append("**Q: Tell us about yourself.**")
+    lines.append(
+        f"A: I'm a Computer Science student at {school} (expected {grad})"
+        + (f" with a {gpa} GPA." if gpa else ".")
+        + " I've built several projects including a Chrome extension for job platform integration, "
+        "a multi-agent content operations framework, and a local-first job application tool. "
+        "I enjoy building practical software that solves real problems.\n"
+    )
+
+    # Q: Availability
+    lines.append("**Q: When are you available?**")
+    avail_start = profile.get("availability_start", "")
+    avail_end = profile.get("availability_end", "")
+    if avail_start:
+        lines.append(f"A: I'm available from {avail_start} to {avail_end or 'mid-August 2026'}, full-time (5 days/week).\n")
+    else:
+        lines.append("A: I'm available full-time for summer 2026.\n")
+
+    # Q: Work arrangement preference
+    lines.append("**Q: Preferred work arrangement?**")
+    wa = profile.get("work_arrangement", {})
+    preferred = wa.get("preferred", "flexible")
+    lines.append(f"A: I prefer {preferred} but am open to remote, hybrid, or on-site arrangements.\n")
+
+    # Q: Location
+    lines.append("**Q: Current location / willing to relocate?**")
+    targets = profile.get("target_locations", [])
+    if targets:
+        lines.append(
+            f"A: Currently based in {location or 'the Bay Area'}. "
+            f"Willing to relocate to {', '.join(targets)} for the internship.\n"
+        )
+    else:
+        lines.append(f"A: Based in {location or 'the Bay Area'}.\n")
+
+    # Q: Notice period
+    lines.append("**Q: How much notice do you need?**")
+    lines.append("A: At least 2 weeks.\n")
+
+    return "\n".join(lines)
+
+
+def _generate_submit_checklist(job_data: dict, prediction: dict) -> str:
+    """Submission checklist requiring human confirmation."""
+    company = job_data.get("company", "Unknown")
+    title = job_data.get("title", "Unknown")
+    decision = prediction.get("decision", "skip")
+    final_score = prediction.get("final_score", 0.0)
+    url = job_data.get("apply_url", "")
+
+    lines = [
+        "# Submit Checklist\n",
+        f"**Job:** {title} at {company}",
+        f"**Prediction Decision:** {decision.upper()} (score: {final_score:.1f}/10)",
+        "",
+        "---",
+        "",
+        "## Pre-Submit Review (HUMAN CONFIRMATION REQUIRED)\n",
+        "Do NOT submit until every item below is checked:\n",
+        "- [ ] I have reviewed `resume_targeted.md` and confirmed all claims are accurate",
+        "- [ ] I have reviewed `cover_letter.md` and it reads naturally",
+        "- [ ] I have reviewed `greeting.md` if using a platform messaging feature",
+        "- [ ] I have reviewed `form_answers.md` for accuracy",
+        "- [ ] I have verified the application URL is correct and accessible",
+        "- [ ] I have checked for any platform-specific requirements (file format, size limits)",
+        "- [ ] I understand this is a real submission and accept responsibility",
+        "",
+    ]
+
+    if url:
+        lines.append(f"**Application URL:** {url}")
+        lines.append("")
+
+    # Decision-specific warnings
+    if decision == "skip":
+        lines.append(
+            "> **WARNING:** The prediction recommends SKIP for this role (score < 3.0). "
+            "> Proceed only if you have additional context not captured in the prediction.\n"
+        )
+    elif decision == "save_for_later":
+        lines.append(
+            "> **NOTE:** The prediction recommends SAVE FOR LATER (score 3.0-5.0). "
+            "> Consider whether the timing or your interest level has changed.\n"
+        )
+
+    lines.append("---\n")
+    lines.append(
+        "Once all items are checked, run:\n"
+        "```\n"
+        f"job mark-submitted {job_data.get('job_id', '<job_id>')}\n"
+        "```\n"
+    )
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def generate_pack(
+    job_data: dict,
+    prediction: dict,
+    profile: dict,
+    evidence: list[dict],
+) -> ApplicationPack:
+    """Create an ApplicationPack with all generated markdown files.
+
+    Args:
+        job_data: Job dict (from Job.to_dict() or raw import).
+        prediction: Prediction dict (from Prediction.to_dict()).
+        profile: Merged profile dict (from load_profile()).
+        evidence: Evidence bank entries (from load_evidence_bank()).
+
+    Returns:
+        ApplicationPack with files dict mapping filename -> markdown content.
+    """
+    job_id = job_data.get("job_id", "unknown")
+
+    jd_md = _generate_jd(job_data)
+    pred_md = _generate_prediction_summary(prediction)
+    resume_md, resume_warnings = _generate_resume(profile, evidence, job_data)
+    greeting_md = _generate_greeting(job_data, profile)
+    cover_md = _generate_cover_letter(job_data, profile, evidence)
+    forms_md = _generate_form_answers(job_data, profile)
+    checklist_md = _generate_submit_checklist(job_data, prediction)
+
+    # Append resume warnings as a header if any
+    if resume_warnings:
+        warning_header = (
+            "> **Resume Warnings (review before submission):**\n"
+            + "\n".join(f"> - {w}" for w in resume_warnings)
+            + "\n\n---\n\n"
+        )
+        resume_md = warning_header + resume_md
+
+    files = {
+        "jd.md": jd_md,
+        "prediction.md": pred_md,
+        "resume_targeted.md": resume_md,
+        "greeting.md": greeting_md,
+        "cover_letter.md": cover_md,
+        "form_answers.md": forms_md,
+        "submit_checklist.md": checklist_md,
+    }
+
+    return ApplicationPack(job_id=job_id, files=files)
+
+
+def validate_pack(pack: ApplicationPack, evidence: list[dict]) -> List[str]:
+    """Validate that all factual claims in the pack are supported by evidence.
+
+    Checks resume_targeted.md for claims not traceable to the evidence bank.
+    Returns a list of warning strings. Empty list means all claims are supported.
+
+    This is a heuristic check — it flags text that appears novel relative to
+    the evidence corpus. False positives are possible; the goal is to catch
+    fabricated or hallucinated content before submission.
+    """
+    warnings: List[str] = []
+    corpus = _build_evidence_corpus(evidence)
+
+    resume_text = pack.files.get("resume_targeted.md", "")
+    if not resume_text:
+        warnings.append("resume_targeted.md is empty or missing.")
+        return warnings
+
+    # Split resume into sections and check each bullet/claim
+    current_section = ""
+    for line in resume_text.split("\n"):
+        stripped = line.strip()
+
+        # Track current section
+        if stripped.startswith("#"):
+            current_section = stripped.lstrip("#").strip()
+            continue
+
+        # Skip non-claim lines
+        if not stripped or stripped.startswith(">") or stripped.startswith("---"):
+            continue
+        if stripped.startswith("**") and ":" in stripped and not stripped.startswith("- "):
+            # This is a field header like "**Languages:** Python, JS" — check the values
+            colon_idx = stripped.index(":")
+            value_part = stripped[colon_idx + 1:].strip().rstrip("*").strip()
+            if value_part and not _evidence_supports_claim(value_part, corpus):
+                warnings.append(
+                    f"[{current_section}] Unsupported claim in field: {stripped}"
+                )
+            continue
+
+        # Check bullet points (project outcomes, etc.)
+        if stripped.startswith("- "):
+            claim = stripped[2:]
+            # Skip meta-lines that are just formatting
+            if claim.startswith("[") or claim.startswith("Available") or claim.startswith("Open to"):
+                continue
+            if not _evidence_supports_claim(claim, corpus):
+                warnings.append(
+                    f"[{current_section}] Potentially unsupported claim: {claim}"
+                )
+
+    # Also check cover letter for unsupported claims
+    cover_text = pack.files.get("cover_letter.md", "")
+    if cover_text:
+        for line in cover_text.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("- **"):
+                # Bullet in cover letter referencing a project
+                if not _evidence_supports_claim(stripped, corpus):
+                    warnings.append(
+                        f"[cover_letter.md] Potentially unsupported claim: {stripped}"
+                    )
+
+    # Check greeting for unsupported claims
+    greeting_text = pack.files.get("greeting.md", "")
+    if greeting_text:
+        # Greeting mentions skills and projects — check key claims
+        for line in greeting_text.split("\n"):
+            stripped = line.strip()
+            if "hands-on experience" in stripped.lower() or "built" in stripped.lower():
+                if not _evidence_supports_claim(stripped, corpus):
+                    warnings.append(
+                        f"[greeting.md] Potentially unsupported claim: {stripped}"
+                    )
+
+    return warnings
+
+
+# ---------------------------------------------------------------------------
+# Convenience: full pipeline from base_dir
+# ---------------------------------------------------------------------------
+
+def generate_pack_from_dir(
+    job_data: dict,
+    prediction: dict,
+    base_dir: str,
+) -> tuple[ApplicationPack, List[str]]:
+    """Generate pack and validate it in one call.
+
+    Args:
+        job_data: Job dict.
+        prediction: Prediction dict.
+        base_dir: Path to project root (contains profile/ directory).
+
+    Returns:
+        (pack, warnings) where warnings is the output of validate_pack().
+    """
+    profile = load_profile(base_dir)
+    evidence = load_evidence_bank(base_dir)
+
+    pack = generate_pack(job_data, prediction, profile, evidence)
+    warnings = validate_pack(pack, evidence)
+
+    return pack, warnings

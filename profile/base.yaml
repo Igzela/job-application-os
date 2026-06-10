@@ -1,0 +1,17 @@
+name: Alex Chen
+school: University of California, Berkeley
+major: Computer Science
+degree: Bachelor of Science
+graduation_date: "2027-05-15"
+location: Berkeley, CA
+target_locations:
+  - San Francisco, CA
+  - Seattle, WA
+  - New York, NY
+  - Austin, TX
+availability_start: "2026-06-01"
+availability_end: "2026-08-15"
+days_per_week: 5
+languages:
+  - English
+  - Mandarin

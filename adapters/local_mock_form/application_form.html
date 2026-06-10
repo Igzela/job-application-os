@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Job Application</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: system-ui, sans-serif; background: #f5f5f5; padding: 2rem; }
+        form { max-width: 600px; margin: 0 auto; background: #fff; padding: 2rem; border-radius: 8px; }
+        h1 { margin-bottom: 1.5rem; font-size: 1.5rem; }
+        label { display: block; margin-top: 1rem; font-weight: 600; font-size: 0.9rem; }
+        input, textarea { width: 100%; padding: 0.5rem; margin-top: 0.25rem; border: 1px solid #ccc; border-radius: 4px; font: inherit; }
+        textarea { resize: vertical; min-height: 80px; }
+        button { margin-top: 1.5rem; padding: 0.75rem 2rem; background: #2563eb; color: #fff; border: none; border-radius: 4px; font-size: 1rem; cursor: pointer; }
+        button:hover { background: #1d4ed8; }
+    </style>
+</head>
+<body>
+    <form action="/submit" method="POST">
+        <h1>Job Application</h1>
+
+        <label for="full_name">Full Name</label>
+        <input type="text" id="full_name" name="full_name" required>
+
+        <label for="email">Email</label>
+        <input type="email" id="email" name="email" required>
+
+        <label for="phone">Phone</label>
+        <input type="tel" id="phone" name="phone">
+
+        <label for="school">School</label>
+        <input type="text" id="school" name="school">
+
+        <label for="major">Major</label>
+        <input type="text" id="major" name="major">
+
+        <label for="graduation_date">Graduation Date</label>
+        <input type="text" id="graduation_date" name="graduation_date" placeholder="e.g. May 2026">
+
+        <label for="skills">Skills</label>
+        <textarea id="skills" name="skills" placeholder="e.g. Python, JavaScript, SQL"></textarea>
+
+        <label for="cover_letter_text">Cover Letter</label>
+        <textarea id="cover_letter_text" name="cover_letter_text" rows="6"></textarea>
+
+        <label for="why_interested">Why are you interested?</label>
+        <textarea id="why_interested" name="why_interested" rows="4"></textarea>
+
+        <label for="availability">Availability</label>
+        <input type="text" id="availability" name="availability" placeholder="e.g. Summer 2026, Full-time">
+
+        <label for="resume_text">Resume Text</label>
+        <textarea id="resume_text" name="resume_text" rows="8" placeholder="Paste resume content here"></textarea>
+
+        <button type="submit">Submit Application</button>
+    </form>
+</body>
+</html>

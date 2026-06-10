@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Job Application Form</title>
+</head>
+<body>
+  <h1>Application Form</h1>
+  <form id="application-form" method="POST" action="/submit">
+
+    <!-- Personal Information -->
+    <fieldset>
+      <legend>Personal Information</legend>
+
+      <label for="first_name">First Name *</label>
+      <input type="text" id="first_name" name="first_name" required />
+
+      <label for="last_name">Last Name *</label>
+      <input type="text" id="last_name" name="last_name" required />
+
+      <label for="email">Email *</label>
+      <input type="email" id="email" name="email" required />
+
+      <label for="phone">Phone</label>
+      <input type="tel" id="phone" name="phone" />
+
+      <label for="linkedin">LinkedIn URL</label>
+      <input type="url" id="linkedin" name="linkedin" />
+
+      <label for="github">GitHub URL</label>
+      <input type="url" id="github" name="github" />
+
+      <label for="location">Current Location</label>
+      <input type="text" id="location" name="location" />
+    </fieldset>
+
+    <!-- Education -->
+    <fieldset>
+      <legend>Education</legend>
+
+      <label for="university">University / School *</label>
+      <input type="text" id="university" name="university" required />
+
+      <label for="degree">Degree *</label>
+      <input type="text" id="degree" name="degree" required />
+
+      <label for="major">Major / Field of Study</label>
+      <input type="text" id="major" name="major" />
+
+      <label for="gpa">GPA</label>
+      <input type="text" id="gpa" name="gpa" />
+
+      <label for="graduation_date">Expected Graduation</label>
+      <input type="text" id="graduation_date" name="graduation_date" />
+
+      <label for="coursework">Relevant Coursework</label>
+      <textarea id="coursework" name="coursework" rows="3"></textarea>
+    </fieldset>
+
+    <!-- Experience -->
+    <fieldset>
+      <legend>Work Experience</legend>
+
+      <label for="experience">Describe your relevant experience *</label>
+      <textarea id="experience" name="experience" rows="6" required></textarea>
+
+      <label for="skills">Skills (comma-separated)</label>
+      <textarea id="skills" name="skills" rows="3"></textarea>
+    </fieldset>
+
+    <!-- Position Details -->
+    <fieldset>
+      <legend>Position Details</legend>
+
+      <label for="position_title">Position Title</label>
+      <input type="text" id="position_title" name="position_title" />
+
+      <label for="company_name">Company Name</label>
+      <input type="text" id="company_name" name="company_name" />
+
+      <label for="how_heard">How did you hear about us?</label>
+      <select id="how_heard" name="how_heard">
+        <option value="">-- Select --</option>
+        <option value="linkedin">LinkedIn</option>
+        <option value="indeed">Indeed</option>
+        <option value="company_website">Company Website</option>
+        <option value="referral">Referral</option>
+        <option value="university_career">University Career Portal</option>
+        <option value="other">Other</option>
+      </select>
+
+      <label for="work_authorization">Work Authorization</label>
+      <select id="work_authorization" name="work_authorization">
+        <option value="">-- Select --</option>
+        <option value="us_citizen">US Citizen</option>
+        <option value="permanent_resident">Permanent Resident</option>
+        <option value="opt">OPT/CPT</option>
+        <option value="visa_sponsorship">Require Visa Sponsorship</option>
+      </select>
+    </fieldset>
+
+    <!-- Additional -->
+    <fieldset>
+      <legend>Additional Information</legend>
+
+      <label for="cover_letter">Cover Letter</label>
+      <textarea id="cover_letter" name="cover_letter" rows="8"></textarea>
+
+      <label for="additional_notes">Additional Notes</label>
+      <textarea id="additional_notes" name="additional_notes" rows="3"></textarea>
+
+      <label for="start_date">Earliest Start Date</label>
+      <input type="text" id="start_date" name="start_date" />
+
+      <label for="salary_expectation">Salary Expectation</label>
+      <input type="text" id="salary_expectation" name="salary_expectation" />
+    </fieldset>
+
+    <!-- Submit (intentionally no default value so dry run never submits) -->
+    <button type="submit" id="submit-btn">Submit Application</button>
+  </form>
+</body>
+</html>

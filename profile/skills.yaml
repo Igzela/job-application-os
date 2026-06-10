@@ -1,0 +1,44 @@
+skills:
+  programming_languages:
+    - name: Python
+      proficiency: advanced
+      areas:
+        - data analysis
+        - machine learning
+        - scripting
+        - backend development
+
+    - name: JavaScript
+      proficiency: advanced
+      areas:
+        - frontend development
+        - Node.js
+        - async programming
+
+  frameworks:
+    - name: React
+      proficiency: advanced
+      areas:
+        - component architecture
+        - state management
+        - hooks
+
+  domains:
+    - name: Data Analysis
+      proficiency: intermediate
+      tools:
+        - pandas
+        - NumPy
+        - matplotlib
+        - SQL
+
+    - name: Machine Learning Basics
+      proficiency: intermediate
+      tools:
+        - scikit-learn
+        - TensorFlow
+        - PyTorch
+      concepts:
+        - supervised learning
+        - unsupervised learning
+        - model evaluation
