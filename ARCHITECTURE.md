@@ -66,6 +66,59 @@ Each CLI command maps to one or more Python modules:
 | `job recommend` | `recommend.recommend_jobs` | Read-only ranked job list |
 | `job validate-pack` | `evidence_markers.generate_evidence_report` | Read-only evidence audit |
 | `job report` | `report.generate_report` | Writes `reports/report.md` |
+| `job scam-check` | `scam_checker.check_opportunity` | Appends to state `opportunities[]` |
+| `job find` | `opportunity_finder.find_opportunities` | Appends to state `opportunities[]` |
+| `job plan` | `action_planner.create_plan` | Writes `active_opportunity` in state |
+| `job boss-import` | `boss_import.import_from_boss` | Writes `jobs/raw/*.json`, updates state |
+| `job submit` | `submitter.submit_application` | No state mutation (dry-run default) |
+| `job retro-freeform` | `retro.record_freeform_retro` | Writes `retros/*.json`, appends `lessons.md` |
+
+## Opportunity Pipeline
+
+The opportunity pipeline extends the job application flow with income opportunity discovery, verification, and planning.
+
+```
+Profile (skills, tier)
+    │
+    ▼
+┌──────────────┐
+│  job find    │  ← discovers opportunities from profile + shared_references/
+│ (opportunity │
+│  finder)     │
+└──────┬───────┘
+       │
+       ▼
+┌──────────────┐
+│ job scam-    │  ← verifies legitimacy against red flag patterns
+│ check        │
+└──────┬───────┘
+       │
+       ▼
+┌──────────────┐
+│  job plan    │  ← generates 2-week execution plan with stop-loss
+│ (action      │
+│  planner)    │
+└──────┬───────┘
+       │
+       ▼
+┌──────────────┐
+│  job submit  │  ← semi-automatic submission (dry-run default)
+│ (submitter)  │
+└──────┬───────┘
+       │
+       ▼
+┌──────────────┐
+│ job retro-   │  ← record freeform lessons
+│ freeform     │
+└──────────────┘
+```
+
+**State:** Opportunities are stored in `.job-state.json` under `opportunities[]`. Active plans go in `active_opportunity`. Lessons accumulate in `lessons.md`.
+
+**Shared references:** `jobos/shared_references/` contains reference docs for the opportunity pipeline:
+- `demand-signal-method.md` — primary method for finding real demand signals
+- `user-tiers.md` — user tier classification (T0-T3) for filtering opportunities
+- `opportunity-taxonomy.md` — categories of AI-era income opportunities
 
 ## Safety Boundaries
 
@@ -76,6 +129,7 @@ Each CLI command maps to one or more Python modules:
 3. **Evidence-only resume.** `pack_generator.validate_pack()` checks every claim in generated resumes against the evidence bank. Unsupported claims are flagged as warnings.
 4. **Immutable predictions.** `predictor.save_prediction()` raises `FileExistsError` if a prediction file already exists. Only `--new-version` creates additional files.
 5. **Rubric bump requires explicit approval.** `rubric_manager.bump_rubric()` creates a candidate but never activates it. The caller must explicitly call `set_active_rubric()`.
+6. **Scam detection before pipeline entry.** `scam_checker.check_opportunity()` evaluates opportunities against red flag patterns. Only "feasible" or "suspect" verdicts enter the pipeline; "scam" verdicts are blocked.
 
 ### What This System Does NOT Do
 
@@ -124,7 +178,7 @@ class LLMAdapter(Protocol):
 ```
 job-application-os/
 ├── jobos/                    # Python package
-│   ├── cli.py               # CLI entry point (argparse, 18 commands)
+│   ├── cli.py               # CLI entry point (argparse, 24 commands)
 │   ├── models.py            # Dataclasses: Job, Prediction, Retro, ApplicationPack
 │   ├── scorer.py            # 6-dimension scoring engine with hard gates
 │   ├── predictor.py         # Immutable prediction creation
@@ -139,6 +193,12 @@ job-application-os/
 │   ├── recommend.py         # Job ranking by composite quality
 │   ├── evidence_markers.py  # Claim-level evidence mapping
 │   ├── report.py            # Analytics report generation
+│   ├── scam_checker.py      # Opportunity legitimacy verification
+│   ├── opportunity_finder.py # Income opportunity discovery from profile
+│   ├── action_planner.py    # Execution plan generation for opportunities
+│   ├── boss_import.py       # BOSS Zhipin job import via CDP
+│   ├── submitter.py         # Semi-automatic application submission
+│   ├── shared_references/   # Reference docs (demand signals, tiers, taxonomy)
 │   ├── llm/                 # LLM adapter (mock by default)
 │   │   ├── base.py          # Protocol interface
 │   │   ├── mock.py          # Deterministic mock
@@ -146,7 +206,7 @@ job-application-os/
 │   └── adapters/            # Form templates
 ├── profile/                  # User profile (YAML + evidence bank)
 ├── rubrics/                  # Scoring rubric definitions
-├── tests/                    # Test suite (249 tests)
+├── tests/                    # Test suite (376+ tests)
 ├── .github/workflows/test.yml  # CI configuration
 ├── pyproject.toml           # Package metadata (primary)
 ├── setup.py                 # Package installation (legacy compat)

@@ -56,6 +56,12 @@ def main():
     p_retro.add_argument("--status-14d", help="Status at 14 days")
     p_retro.add_argument("--status-30d", help="Status at 30 days")
 
+    # job retro-freeform
+    p_retro_freeform = subparsers.add_parser("retro-freeform", help="Record freeform retrospective with lessons")
+    p_retro_freeform.add_argument("--job", required=True, help="Job ID")
+    p_retro_freeform.add_argument("--text", required=True, help="Freeform retrospective text")
+    p_retro_freeform.add_argument("--lesson", action="append", required=True, help="Lesson extracted (repeatable)")
+
     # job status
     subparsers.add_parser("status", help="Update STATUS.md")
 
@@ -104,6 +110,19 @@ def main():
     p_plan = subparsers.add_parser("plan", help="Generate execution plan for an opportunity")
     p_plan.add_argument("--opportunity", required=True, help="Name of the opportunity to plan")
 
+    # job boss-import
+    p_boss = subparsers.add_parser("boss-import", help="Import jobs from BOSS Zhipin via CDP")
+    p_boss.add_argument("--keyword", required=True, help="Search keyword (e.g. 'AIGC')")
+    p_boss.add_argument("--city", default="100010000", help="City code (default: 100010000 = nationwide)")
+    p_boss.add_argument("--port", type=int, default=9222, help="Chrome debug port (default: 9222)")
+
+    # job submit
+    p_submit_cmd = subparsers.add_parser("submit", help="Semi-automatic application submission")
+    p_submit_cmd.add_argument("--job", required=True, help="Job ID")
+    p_submit_cmd.add_argument("--platform", required=True, help="Target platform (e.g. boss)")
+    p_submit_cmd.add_argument("--dry-run", action="store_true", default=True, help="Dry-run mode (default)")
+    p_submit_cmd.add_argument("--confirm", action="store_true", help="Confirm submission (required for non-dry-run)")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -135,6 +154,9 @@ def _dispatch(args):
         "scam-check": _cmd_scam_check,
         "find": _cmd_find,
         "plan": _cmd_plan,
+        "boss-import": _cmd_boss_import,
+        "submit": _cmd_submit,
+        "retro-freeform": _cmd_retro_freeform,
     }
     handler = handlers.get(args.command)
     if handler:
@@ -454,6 +476,29 @@ def _cmd_retro(args):
         if args.status_30d:
             print(f"  30d: {args.status_30d}")
     except KeyError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _cmd_retro_freeform(args):
+    from .retro import record_freeform_retro
+
+    root = _get_root()
+    job_id = args.job
+
+    try:
+        path = record_freeform_retro(
+            job_id=job_id,
+            text=args.text,
+            lessons=args.lesson,
+            state_dir=str(root),
+        )
+        print(f"Freeform retro recorded: {path}")
+        print(f"  Text: {args.text[:80]}{'...' if len(args.text) > 80 else ''}")
+        print(f"  Lessons ({len(args.lesson)}):")
+        for lesson in args.lesson:
+            print(f"    - {lesson}")
+    except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
@@ -984,3 +1029,107 @@ def _cmd_plan(args):
     state["active_opportunity"] = plan.to_dict()
     state_path.write_text(json.dumps(state, indent=2) + "\n")
     print(f"\nPlan written to .job-state.json active_opportunity")
+
+
+def _cmd_submit(args):
+    from .submitter import submit_application
+
+    root = _get_root()
+    job_id = args.job
+    platform = args.platform
+    is_dry_run = args.dry_run and not args.confirm
+
+    try:
+        result = submit_application(
+            job_id=job_id,
+            platform=platform,
+            state_dir=str(root),
+            dry_run=is_dry_run,
+            confirm=args.confirm,
+        )
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except NotImplementedError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    mode = "DRY RUN" if result.dry_run else "LIVE"
+    print(f"Submit [{mode}] for {job_id} on {platform}:")
+    print(f"  Fields prepared: {len(result.fields_filled)}")
+    for field_name, value in result.fields_filled.items():
+        preview = value[:60] + ("..." if len(value) > 60 else "")
+        print(f"    {field_name}: {preview}")
+    if result.dry_run:
+        print("  Mode: DRY RUN — nothing submitted")
+
+
+def _cmd_boss_import(args):
+    from .boss_import import import_from_boss
+    from datetime import datetime, timezone
+    import re as _re
+
+    root = _get_root()
+    keyword = args.keyword
+    city_code = args.city
+    port = args.port
+
+    try:
+        jobs = import_from_boss(keyword, city_code, port)
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except ConnectionError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except PermissionError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if not jobs:
+        print(f"No jobs found for keyword '{keyword}' (city={city_code}).")
+        return
+
+    raw_dir = root / "jobs" / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+
+    state_path = root / ".job-state.json"
+    state = json.loads(state_path.read_text()) if state_path.exists() else {"jobs": {}}
+
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    imported = 0
+
+    for i, job in enumerate(jobs):
+        slug = _re.sub(r"[^a-z0-9]+", "-", job["title"].lower()).strip("-")[:40]
+        job_id = f"{ts}-boss-{i:03d}-{slug}"
+
+        # Write raw job data as JSON
+        raw_path = raw_dir / f"{job_id}.json"
+        raw_path.write_text(json.dumps(job, indent=2, ensure_ascii=False) + "\n")
+
+        # Register in state
+        state["jobs"][job_id] = {
+            "title": job["title"],
+            "company": job["company"],
+            "location": job.get("city_code", city_code),
+            "status": "imported",
+            "captured_at": job.get("imported_at", ""),
+            "source": "boss_zhipin",
+            "keyword": keyword,
+            "link": job.get("link", ""),
+        }
+        imported += 1
+
+    state_path.write_text(json.dumps(state, indent=2) + "\n")
+
+    print(f"Imported {imported} jobs for keyword '{keyword}':")
+    for job in jobs:
+        print(f"  - {job['title']} @ {job['company']}  {job['salary']}")
+    print(f"\nRaw files saved to: jobs/raw/")
+    print(f"State updated: .job-state.json")

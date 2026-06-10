@@ -14,7 +14,7 @@ import yaml
 
 from jobos.cli import _cmd_init, _cmd_import, _cmd_score, _cmd_predict
 from jobos.cli import _cmd_pack, _cmd_dry_run, _cmd_mark_submitted
-from jobos.cli import _cmd_retro, _cmd_status, _cmd_bump_rubric
+from jobos.cli import _cmd_retro, _cmd_retro_freeform, _cmd_status, _cmd_bump_rubric
 
 
 class _Args:
@@ -348,3 +348,44 @@ class TestFullPipeline:
         _cmd_bump_rubric(_Args(new_rubric=str(candidate)))
         state = json.loads((project_dir / ".job-state.json").read_text())
         assert state["active_rubric"] == "v0_student_internship"  # unchanged
+
+
+class TestRetroFreeformCLI:
+    """CLI integration for job retro-freeform command."""
+
+    def test_retro_freeform_writes_files(self, project_dir: Path) -> None:
+        """Full pipeline: init → import → retro-freeform → verify files."""
+        _cmd_init(_Args())
+
+        # Create a sample JD file since init doesn't include one
+        raw_dir = project_dir / "jobs" / "raw"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        jd_path = raw_dir / "sample_jd.md"
+        jd_path.write_text("# Software Engineer Intern\n\nCompany: TestCo\nLocation: Remote\n")
+
+        _cmd_import(_Args(file=str(jd_path)))
+
+        # Find job ID from state
+        state = json.loads((project_dir / ".job-state.json").read_text())
+        job_id = list(state["jobs"].keys())[0]
+
+        _cmd_retro_freeform(_Args(
+            job=job_id,
+            text="Applied, no response after 5 days.",
+            lesson=["Always follow up", "Tailor resume to JD keywords"],
+        ))
+
+        # Verify retro file
+        retro_path = project_dir / "retros" / f"{job_id}.json"
+        assert retro_path.exists()
+        data = json.loads(retro_path.read_text())
+        assert len(data["freeform_retros"]) == 1
+        assert data["freeform_retros"][0]["text"] == "Applied, no response after 5 days."
+        assert "Always follow up" in data["freeform_retros"][0]["lessons"]
+
+        # Verify lessons.md
+        lessons_path = project_dir / "lessons.md"
+        assert lessons_path.exists()
+        content = lessons_path.read_text()
+        assert "- Always follow up" in content
+        assert "- Tailor resume to JD keywords" in content

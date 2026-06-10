@@ -11,6 +11,7 @@ import pytest
 from jobos.retro import (
     record_submission,
     record_retro,
+    record_freeform_retro,
     get_pending_retros,
 )
 
@@ -268,3 +269,90 @@ class TestGetPendingRetros:
         pending = get_pending_retros(state_dir)
         # 3d is filled, so it should not appear in due_windows
         assert all("3d" not in p["due_windows"] for p in pending)
+
+
+# ---------------------------------------------------------------------------
+# record_freeform_retro
+# ---------------------------------------------------------------------------
+
+class TestRecordFreeformRetro:
+    def test_creates_retro_file(self, state_dir: Path) -> None:
+        path = record_freeform_retro(
+            "alpha-001",
+            "Applied via greenhouse, no response yet.",
+            ["Always follow up after 3 days"],
+            state_dir,
+        )
+
+        assert path.exists()
+        assert path == state_dir / "retros" / "alpha-001.json"
+
+    def test_retro_file_has_job_id(self, state_dir: Path) -> None:
+        path = record_freeform_retro(
+            "alpha-001", "Some text", ["Lesson A"], state_dir
+        )
+        data = json.loads(path.read_text())
+
+        assert data["job_id"] == "alpha-001"
+
+    def test_retro_file_has_freeform_entries(self, state_dir: Path) -> None:
+        path = record_freeform_retro(
+            "alpha-001",
+            "Retro text here",
+            ["Lesson 1", "Lesson 2"],
+            state_dir,
+        )
+        data = json.loads(path.read_text())
+
+        assert len(data["freeform_retros"]) == 1
+        entry = data["freeform_retros"][0]
+        assert entry["text"] == "Retro text here"
+        assert entry["lessons"] == ["Lesson 1", "Lesson 2"]
+        assert "recorded_at" in entry
+
+    def test_appends_to_existing_retro(self, state_dir: Path) -> None:
+        record_freeform_retro("alpha-001", "First retro", ["L1"], state_dir)
+        path = record_freeform_retro(
+            "alpha-001", "Second retro", ["L2"], state_dir
+        )
+        data = json.loads(path.read_text())
+
+        assert len(data["freeform_retros"]) == 2
+        assert data["freeform_retros"][0]["text"] == "First retro"
+        assert data["freeform_retros"][1]["text"] == "Second retro"
+
+    def test_creates_lessons_md(self, state_dir: Path) -> None:
+        record_freeform_retro(
+            "alpha-001",
+            "Some retro",
+            ["Always follow up", "Tailor resume"],
+            state_dir,
+        )
+
+        lessons_path = state_dir / "lessons.md"
+        assert lessons_path.exists()
+        content = lessons_path.read_text()
+        assert "- Always follow up" in content
+        assert "- Tailor resume" in content
+
+    def test_appends_to_existing_lessons_md(self, state_dir: Path) -> None:
+        record_freeform_retro("alpha-001", "Retro 1", ["Lesson A"], state_dir)
+        record_freeform_retro("alpha-002", "Retro 2", ["Lesson B"], state_dir)
+
+        content = (state_dir / "lessons.md").read_text()
+        assert "- Lesson A" in content
+        assert "- Lesson B" in content
+
+    def test_lessons_md_has_header(self, state_dir: Path) -> None:
+        record_freeform_retro(
+            "alpha-001", "Retro", ["A lesson"], state_dir
+        )
+        content = (state_dir / "lessons.md").read_text()
+        assert content.startswith("# Lessons Learned")
+
+    def test_updated_at_is_set(self, state_dir: Path) -> None:
+        path = record_freeform_retro(
+            "alpha-001", "text", ["lesson"], state_dir
+        )
+        data = json.loads(path.read_text())
+        assert "updated_at" in data

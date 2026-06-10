@@ -4,7 +4,7 @@
 > It imports job descriptions, scores fit, predicts outcomes, and generates application
 > packs — all locally. Submission is always manual.
 
-A local-first copilot that turns job applications into calibrated experiments.
+A local-first job application OS: discover opportunities, verify legitimacy, prepare applications, track submissions, and learn from outcomes.
 
 ## Quickstart
 
@@ -90,11 +90,17 @@ job report
 | `job status` | Update STATUS.md with pipeline counts |
 | `job report` | Generate analytics report |
 | `job bump-rubric --new-rubric <path>` | Create rubric candidate + comparison |
+| `job scam-check --name <name> --description <desc>` | Check an opportunity for scam signals |
+| `job find [--direction <dir>]` | Find income opportunities from profile |
+| `job plan --opportunity <name>` | Generate execution plan for an opportunity |
+| `job boss-import --keyword <kw>` | Import jobs from BOSS Zhipin via CDP |
+| `job submit --job <id> --platform <plat>` | Semi-automatic application submission |
+| `job retro-freeform --job <id> --text <text> --lesson <l>` | Record freeform retro with extracted lessons |
 
 ## Running Tests
 
 ```bash
-# Run all tests (249 tests, no API keys needed)
+# Run all tests (376+ tests, no API keys needed)
 python -m pytest tests/ -v
 
 # Run specific test file
@@ -114,6 +120,7 @@ This system is explicitly **not** an auto-apply bot:
 - **Immutable predictions.** Predictions cannot be overwritten — only versioned.
 - **Human confirmation required.** The `submit_checklist.md` requires manual review before any real submission.
 - **LLM is optional.** The LLM adapter defaults to a deterministic mock. No API keys required. No network calls in tests.
+- **Scam detection.** `scam-check` evaluates opportunities against red flag patterns before they enter the pipeline.
 
 ## CI
 

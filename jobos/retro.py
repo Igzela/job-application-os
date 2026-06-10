@@ -221,6 +221,66 @@ def record_retro(
     return retro_path
 
 
+def record_freeform_retro(
+    job_id: str,
+    text: str,
+    lessons: List[str],
+    state_dir: str | Path,
+) -> Path:
+    """Record a freeform retrospective with extracted lessons.
+
+    Writes to retros/<job_id>.json (appends to existing retro if present).
+    Appends lessons to lessons.md in the state directory.
+
+    Args:
+        job_id: Unique identifier for the job application.
+        text: Freeform retrospective text.
+        lessons: List of lesson strings extracted from the retro.
+        state_dir: Root directory containing retros/ and lessons.md.
+
+    Returns:
+        Path to the retro file.
+    """
+    state_dir = Path(state_dir)
+
+    retro_dir = _retros_dir(state_dir)
+    retro_dir.mkdir(parents=True, exist_ok=True)
+    retro_path = retro_dir / f"{job_id}.json"
+
+    # Load existing retro file or start fresh
+    if retro_path.exists():
+        retro_data = json.loads(retro_path.read_text(encoding="utf-8"))
+    else:
+        retro_data = {
+            "job_id": job_id,
+            "created_at": _now_iso(),
+        }
+
+    # Append freeform entry
+    freeform_entries = retro_data.get("freeform_retros", [])
+    freeform_entries.append({
+        "text": text,
+        "lessons": lessons,
+        "recorded_at": _now_iso(),
+    })
+    retro_data["freeform_retros"] = freeform_entries
+    retro_data["updated_at"] = _now_iso()
+
+    retro_path.write_text(json.dumps(retro_data, indent=2, ensure_ascii=False) + "\n")
+
+    # Append lessons to lessons.md
+    lessons_path = state_dir / "lessons.md"
+    existing = lessons_path.read_text(encoding="utf-8") if lessons_path.exists() else "# Lessons Learned\n\n"
+    new_lines = []
+    for lesson in lessons:
+        new_lines.append(f"- {lesson}")
+    if new_lines:
+        existing += "\n".join(new_lines) + "\n"
+    lessons_path.write_text(existing, encoding="utf-8")
+
+    return retro_path
+
+
 def get_pending_retros(state_dir: str | Path) -> List[Dict[str, Any]]:
     """List jobs that need retro updates.
 
