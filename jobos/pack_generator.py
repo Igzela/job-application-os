@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Set
 
 from .models import ApplicationPack, Job, Prediction
 from .profile_loader import load_evidence_bank, load_profile
+from .evidence_markers import find_evidence_source
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +325,12 @@ def _generate_resume(
             content = entry.get("content", "")
             entry_skills = entry.get("skills", [])
 
+            # Derive slug for evidence marker
+            import re as _re
+            entry_title_slug = "evidence_bank.md#" + _re.sub(
+                r"[^a-z0-9]+", "-", title.lower()
+            ).strip("-") if title else "evidence_bank.md"
+
             lines.append(f"### {title}\n")
 
             # Render structured fields
@@ -342,7 +349,14 @@ def _generate_resume(
 
             if concrete_lines:
                 lines.append("**Key Outcomes:**")
-                lines.extend(concrete_lines)
+                for bullet in concrete_lines:
+                    # Add evidence provenance marker
+                    claim_text = bullet[2:] if bullet.startswith("- ") else bullet
+                    source = find_evidence_source(claim_text, evidence)
+                    if source:
+                        lines.append(f"{bullet} <!-- evidence: {source} -->")
+                    else:
+                        lines.append(f"{bullet} <!-- evidence: {entry_title_slug} -->")
                 lines.append("")
 
             if entry_skills:
@@ -387,21 +401,25 @@ def _generate_resume(
     return resume_text, warnings
 
 
-def _generate_greeting(job_data: dict, profile: dict) -> str:
-    """Chinese-style greeting message for internship platforms like Boss Zhipin."""
+def _generate_greeting(job_data: dict, profile: dict, evidence: list[dict]) -> str:
+    """Greeting message derived entirely from profile and evidence bank."""
     name = profile.get("name", "")
     company = job_data.get("company", "")
-    title = job_data.get("title", "internship position")
+    title = job_data.get("title", "open position")
 
-    # Extract first name or use full name
     first_name = name.split()[0] if name else "there"
 
+    # Education — derive from profile only
     school = ""
+    degree = ""
     edu_list = profile.get("education", [])
     if edu_list:
         school = edu_list[0].get("institution", "")
+        degree = edu_list[0].get("major", edu_list[0].get("degree", ""))
     if not school:
         school = profile.get("school", "")
+    if not degree:
+        degree = profile.get("major", "")
 
     grad = ""
     if edu_list:
@@ -409,54 +427,108 @@ def _generate_greeting(job_data: dict, profile: dict) -> str:
     if not grad:
         grad = profile.get("graduation_date", "")
 
-    # Key skills for the greeting
+    # Skills — derive from profile only
     skills_data = profile.get("skills", {})
     prog_langs = skills_data.get("programming_languages", [])
-    lang_names = [l.get("name", "") for l in prog_langs[:3]]
+    lang_names = [l.get("name", "") for l in prog_langs[:3] if l.get("name")]
 
-    greeting = f"""Hello! I'm {first_name}, a Computer Science student at {school} (expected graduation {grad}). I'm very interested in the {title} role at {company}.
+    # Availability — derive from profile only
+    avail_start = profile.get("availability_start", "")
+    if not avail_start:
+        iw = profile.get("internship_window", {})
+        if isinstance(iw, dict):
+            avail_start = iw.get("start", "")
 
-I have hands-on experience with {', '.join(lang_names) if lang_names else 'multiple programming languages'} through personal projects and coursework, including building a Chrome extension with full-stack capabilities, designing multi-agent systems, and completing data analysis projects with real datasets.
+    # Build greeting from derived data
+    lines = [f"Hello! I'm {first_name}"]
+    if degree and school:
+        lines[0] += f", a {degree} student at {school}"
+    elif school:
+        lines[0] += f", a student at {school}"
+    if grad:
+        lines[0] += f" (expected graduation {grad})"
+    lines[0] += f". I'm very interested in the {title} role at {company}."
 
-I'm available full-time starting June 2026 and am excited about the opportunity to contribute to your team. I'd love to learn more about the role and share how my background could be a good fit.
+    # Evidence-based experience summary
+    if evidence:
+        project_names = [e.get("title", "") for e in evidence[:3] if e.get("title")]
+        if project_names:
+            lines.append(
+                f"\nI have experience with {', '.join(lang_names) if lang_names else 'relevant technologies'} "
+                f"through projects including {', '.join(project_names)}."
+            )
+        else:
+            lines.append(f"\nI have experience with {', '.join(lang_names) if lang_names else 'relevant technologies'}.")
+    elif lang_names:
+        lines.append(f"\nI have experience with {', '.join(lang_names)} through coursework and personal projects.")
+    else:
+        lines.append("\nI have relevant technical experience through coursework and personal projects.")
 
-Looking forward to hearing from you!"""
+    if avail_start:
+        lines.append(f"\nI'm available starting {avail_start} and am excited about the opportunity to contribute to your team.")
+    else:
+        lines.append("\nI'm excited about the opportunity to contribute to your team.")
 
-    return greeting
+    lines.append("Looking forward to hearing from you!")
+
+    return "\n".join(lines)
 
 
 def _generate_cover_letter(job_data: dict, profile: dict, evidence: list[dict]) -> str:
-    """Short cover letter (evidence-based only)."""
+    """Short cover letter — every claim derived from profile or evidence bank."""
     name = profile.get("name", "Candidate")
     company = job_data.get("company", "your company")
     title = job_data.get("title", "the open position")
 
-    # Pick top 2 evidence entries to mention
     highlights = evidence[:2] if evidence else []
 
+    # Education — from profile only
     school = ""
+    degree = ""
     edu_list = profile.get("education", [])
     if edu_list:
         school = edu_list[0].get("institution", "")
+        degree = edu_list[0].get("major", edu_list[0].get("degree", ""))
     if not school:
         school = profile.get("school", "")
+    if not degree:
+        degree = profile.get("major", "")
+
+    # Availability — from profile only
+    avail_start = profile.get("availability_start", "")
+    if not avail_start:
+        iw = profile.get("internship_window", {})
+        if isinstance(iw, dict):
+            avail_start = iw.get("start", "")
 
     lines = [f"Dear Hiring Team,\n"]
-    lines.append(
-        f"I am writing to express my interest in the {title} position at {company}. "
-        f"As a Computer Science student at {school}, I bring a strong foundation in "
-        f"software development and a passion for building practical tools.\n"
-    )
+
+    # Intro — derive degree/major from profile, never hardcode
+    if degree and school:
+        lines.append(
+            f"I am writing to express my interest in the {title} position at {company}. "
+            f"As a {degree} student at {school}, I bring a strong foundation in "
+            f"technical problem-solving.\n"
+        )
+    elif school:
+        lines.append(
+            f"I am writing to express my interest in the {title} position at {company}. "
+            f"As a student at {school}, I bring relevant technical experience.\n"
+        )
+    else:
+        lines.append(
+            f"I am writing to express my interest in the {title} position at {company}. "
+            f"I bring relevant technical experience and a strong work ethic.\n"
+        )
 
     if highlights:
-        lines.append("Here are two projects that demonstrate my relevant experience:\n")
+        lines.append("Here are projects that demonstrate my relevant experience:\n")
         for entry in highlights:
             title_e = entry.get("title", "A project")
             fields = entry.get("fields", {})
             tech = fields.get("Tech", "") if isinstance(fields, dict) else ""
             content = entry.get("content", "")
 
-            # Extract first concrete outcome
             outcome = ""
             for line in content.split("\n"):
                 stripped = line.strip()
@@ -472,41 +544,70 @@ def _generate_cover_letter(job_data: dict, profile: dict, evidence: list[dict]) 
             lines.append(bullet)
         lines.append("")
 
-    lines.append(
-        "All of my work is documented with concrete, verifiable outcomes. "
-        "I am available full-time starting June 2026 and eager to contribute to your team.\n"
-    )
+    # Availability — from profile only
+    if avail_start:
+        lines.append(f"I am available starting {avail_start} and eager to contribute to your team.\n")
+    else:
+        lines.append("I am eager to contribute to your team.\n")
+
     lines.append("Thank you for your consideration.\n")
     lines.append(f"Best regards,\n{name}")
 
     return "\n".join(lines)
 
 
-def _generate_form_answers(job_data: dict, profile: dict) -> str:
-    """Common form Q&A for internship applications."""
-    name = profile.get("name", "")
+def _generate_form_answers(job_data: dict, profile: dict, evidence: list[dict]) -> str:
+    """Common form Q&A — every answer derived from profile and evidence bank."""
     company = job_data.get("company", "")
     title = job_data.get("title", "")
 
+    # Education — from profile only
     school = ""
+    degree = ""
     edu_list = profile.get("education", [])
     if edu_list:
         school = edu_list[0].get("institution", "")
+        degree = edu_list[0].get("major", edu_list[0].get("degree", ""))
         grad = edu_list[0].get("graduation_date", "TBD")
         gpa = edu_list[0].get("gpa", "")
     else:
         school = profile.get("school", "")
+        degree = profile.get("major", "")
         grad = profile.get("graduation_date", "TBD")
         gpa = ""
 
+    # Skills — from profile only
     skills_data = profile.get("skills", {})
     all_skills = []
     for lang in skills_data.get("programming_languages", []):
-        all_skills.append(lang.get("name", ""))
+        if lang.get("name"):
+            all_skills.append(lang["name"])
     for fw in skills_data.get("frameworks", []):
-        all_skills.append(fw.get("name", ""))
+        if fw.get("name"):
+            all_skills.append(fw["name"])
 
     location = profile.get("location", "")
+
+    # Project names — from evidence bank only
+    project_names = [e.get("title", "") for e in evidence if e.get("title")]
+
+    # Availability — from profile only
+    avail_start = profile.get("availability_start", "")
+    if not avail_start:
+        iw = profile.get("internship_window", {})
+        if isinstance(iw, dict):
+            avail_start = iw.get("start", "")
+    avail_end = profile.get("availability_end", "")
+    if not avail_end:
+        iw = profile.get("internship_window", {})
+        if isinstance(iw, dict):
+            avail_end = iw.get("end", "")
+
+    days_per_week = profile.get("days_per_week", "")
+    if not days_per_week:
+        wc = profile.get("weekly_capacity", {})
+        if isinstance(wc, dict):
+            days_per_week = wc.get("days_per_week", "")
 
     lines = ["# Form Answers\n"]
 
@@ -514,55 +615,74 @@ def _generate_form_answers(job_data: dict, profile: dict) -> str:
     lines.append(f"**Q: Why {company}?**")
     lines.append(
         f"A: I'm drawn to {company}'s work and believe the {title} role aligns well "
-        f"with my technical background and career goals in software engineering.\n"
+        f"with my technical background.\n"
     )
 
     # Q: Why this role?
     lines.append(f"**Q: Why this role?**")
+    skill_str = ", ".join(all_skills[:4]) if all_skills else "relevant technologies"
     lines.append(
-        f"A: The {title} position matches my skills in {', '.join(all_skills[:4]) if all_skills else 'software development'} "
-        f"and offers an opportunity to apply what I've learned in a professional setting.\n"
+        f"A: The {title} position matches my skills in {skill_str} "
+        f"and offers an opportunity to apply what I've learned.\n"
     )
 
-    # Q: Tell us about yourself
+    # Q: Tell us about yourself — derive from profile + evidence, never hardcode
     lines.append("**Q: Tell us about yourself.**")
-    lines.append(
-        f"A: I'm a Computer Science student at {school} (expected {grad})"
-        + (f" with a {gpa} GPA." if gpa else ".")
-        + " I've built several projects including a Chrome extension for job platform integration, "
-        "a multi-agent content operations framework, and a local-first job application tool. "
-        "I enjoy building practical software that solves real problems.\n"
-    )
-
-    # Q: Availability
-    lines.append("**Q: When are you available?**")
-    avail_start = profile.get("availability_start", "")
-    avail_end = profile.get("availability_end", "")
-    if avail_start:
-        lines.append(f"A: I'm available from {avail_start} to {avail_end or 'mid-August 2026'}, full-time (5 days/week).\n")
+    intro = f"A: I'm"
+    if degree and school:
+        intro += f" a {degree} student at {school}"
+    elif school:
+        intro += f" a student at {school}"
     else:
-        lines.append("A: I'm available full-time for summer 2026.\n")
+        intro += " a motivated student"
+    intro += f" (expected {grad})" if grad and grad != "TBD" else ""
+    intro += f" with a {gpa} GPA." if gpa else "."
+
+    if project_names:
+        intro += f" I've worked on projects including {', '.join(project_names[:3])}."
+    intro += "\n"
+    lines.append(intro)
+
+    # Q: Availability — from profile only
+    lines.append("**Q: When are you available?**")
+    if avail_start:
+        end_str = avail_end or "the end of the internship window"
+        dpw = f", {days_per_week} days/week" if days_per_week else ""
+        lines.append(f"A: I'm available from {avail_start} to {end_str}{dpw}.\n")
+    else:
+        lines.append("A: Please see my profile for availability details.\n")
 
     # Q: Work arrangement preference
     lines.append("**Q: Preferred work arrangement?**")
     wa = profile.get("work_arrangement", {})
-    preferred = wa.get("preferred", "flexible")
-    lines.append(f"A: I prefer {preferred} but am open to remote, hybrid, or on-site arrangements.\n")
+    preferred = wa.get("preferred", "")
+    if preferred:
+        lines.append(f"A: I prefer {preferred} but am open to other arrangements.\n")
+    else:
+        lines.append("A: I'm flexible and open to remote, hybrid, or on-site arrangements.\n")
 
     # Q: Location
     lines.append("**Q: Current location / willing to relocate?**")
     targets = profile.get("target_locations", [])
-    if targets:
-        lines.append(
-            f"A: Currently based in {location or 'the Bay Area'}. "
-            f"Willing to relocate to {', '.join(targets)} for the internship.\n"
-        )
+    if location and targets:
+        lines.append(f"A: Currently based in {location}. Willing to relocate to {', '.join(targets)}.\n")
+    elif location:
+        lines.append(f"A: Based in {location}.\n")
     else:
-        lines.append(f"A: Based in {location or 'the Bay Area'}.\n")
+        lines.append("A: Please see my profile for location details.\n")
 
     # Q: Notice period
     lines.append("**Q: How much notice do you need?**")
-    lines.append("A: At least 2 weeks.\n")
+    constraints = profile.get("constraints", [])
+    notice = None
+    for c in constraints:
+        if "notice" in c.lower():
+            notice = c
+            break
+    if notice:
+        lines.append(f"A: {notice}\n")
+    else:
+        lines.append("A: At least 2 weeks.\n")
 
     return "\n".join(lines)
 
@@ -647,9 +767,9 @@ def generate_pack(
     jd_md = _generate_jd(job_data)
     pred_md = _generate_prediction_summary(prediction)
     resume_md, resume_warnings = _generate_resume(profile, evidence, job_data)
-    greeting_md = _generate_greeting(job_data, profile)
+    greeting_md = _generate_greeting(job_data, profile, evidence)
     cover_md = _generate_cover_letter(job_data, profile, evidence)
-    forms_md = _generate_form_answers(job_data, profile)
+    forms_md = _generate_form_answers(job_data, profile, evidence)
     checklist_md = _generate_submit_checklist(job_data, prediction)
 
     # Append resume warnings as a header if any

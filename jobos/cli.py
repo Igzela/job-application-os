@@ -692,7 +692,7 @@ def _cmd_queue(args):
     stages = [
         ("Imported (unscored)", "unscored"),
         ("Scored (unpredicted)", "unpredicted"),
-        ("Predicted (unpacked)", "unpredicted"),
+        ("Predicted (unpacked)", "unpacked"),
         ("Packed (unsubmitted)", "unsubmitted"),
         ("Submitted — waiting 3d retro", "waiting_3d"),
         ("Submitted — waiting 14d retro", "waiting_14d"),
