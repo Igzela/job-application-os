@@ -38,17 +38,17 @@ def parse_job_list(html: str) -> List[BossJob]:
     page = Selector(html)
     jobs: List[BossJob] = []
 
-    cards = page.css(".job-card-wrapper") or page.css("[class*='job-card']")
+    cards = page.css("li.job-card-box") or page.css("[class*='job-card']")
     if not cards:
-        cards = page.css("li.job-card-wrapper") or page.css(".search-job-result li")
+        cards = page.css(".job-card-wrapper") or page.css(".search-job-result li")
 
     for card in cards:
-        title_el = card.css(".job-name a") or card.css(".job-name") or card.css("[class*='job-name']")
-        company_el = card.css(".company-name a") or card.css(".company-name") or card.css("[class*='company']")
-        salary_el = card.css(".salary") or card.css("[class*='salary']")
-        location_el = card.css(".job-area") or card.css("[class*='area']")
+        title_el = card.css("a.job-name") or card.css(".job-name") or card.css("[class*='job-name']")
+        company_el = card.css(".boss-name") or card.css(".company-name") or card.css("[class*='company']")
+        salary_el = card.css(".job-salary") or card.css("[class*='salary']")
+        location_el = card.css(".company-location") or card.css(".job-area") or card.css("[class*='area']")
         tag_els = card.css(".tag-list li") or card.css("[class*='tag'] li")
-        link_el = card.css(".job-name a") or card.css("a[href*='job_detail']")
+        link_el = card.css("a[href*='job_detail']") or card.css("a.job-name")
 
         title = _text(title_el)
         company = _text(company_el)

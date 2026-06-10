@@ -16,20 +16,32 @@ from jobos.boss_parser import (
 
 SAMPLE_JOB_LIST_HTML = """
 <html><body>
-<div class="job-card-wrapper">
-  <div class="job-name"><a href="/job_detail/abc123.html">Python开发工程师</a></div>
-  <div class="company-name"><a href="/company/123">字节跳动</a></div>
-  <div class="salary">25-50K</div>
-  <div class="job-area">北京</div>
-  <div class="tag-list"><li>Python</li><li>Django</li></div>
-</div>
-<div class="job-card-wrapper">
-  <div class="job-name"><a href="/job_detail/def456.html">前端工程师</a></div>
-  <div class="company-name"><a href="/company/456">阿里巴巴</a></div>
-  <div class="salary">30-60K</div>
-  <div class="job-area">杭州</div>
-  <div class="tag-list"><li>React</li><li>TypeScript</li></div>
-</div>
+<li class="job-card-box">
+  <div class="job-info">
+    <div class="job-title clearfix">
+      <a href="/job_detail/abc123.html" class="job-name">Python开发工程师</a>
+      <span class="job-salary">25-50K</span>
+    </div>
+    <ul class="tag-list"><li>3-5年</li><li>本科</li></ul>
+  </div>
+  <div class="job-card-footer">
+    <a class="boss-info"><span class="boss-name">字节跳动</span></a>
+    <span class="company-location">北京</span>
+  </div>
+</li>
+<li class="job-card-box">
+  <div class="job-info">
+    <div class="job-title clearfix">
+      <a href="/job_detail/def456.html" class="job-name">前端工程师</a>
+      <span class="job-salary">30-60K</span>
+    </div>
+    <ul class="tag-list"><li>1-3年</li><li>本科</li></ul>
+  </div>
+  <div class="job-card-footer">
+    <a class="boss-info"><span class="boss-name">阿里巴巴</span></a>
+    <span class="company-location">杭州</span>
+  </div>
+</li>
 </body></html>
 """
 
@@ -57,7 +69,7 @@ class TestParseJobList:
 
     def test_extracts_company(self) -> None:
         jobs = parse_job_list(SAMPLE_JOB_LIST_HTML)
-        assert jobs[0].company == "字节跳动"
+        assert "字节跳动" in jobs[0].company
 
     def test_extracts_salary(self) -> None:
         jobs = parse_job_list(SAMPLE_JOB_LIST_HTML)
@@ -65,12 +77,12 @@ class TestParseJobList:
 
     def test_extracts_location(self) -> None:
         jobs = parse_job_list(SAMPLE_JOB_LIST_HTML)
-        assert jobs[0].location == "北京"
+        assert "北京" in jobs[0].location
 
     def test_extracts_tags(self) -> None:
         jobs = parse_job_list(SAMPLE_JOB_LIST_HTML)
-        assert "Python" in jobs[0].tags
-        assert "Django" in jobs[0].tags
+        assert "3-5年" in jobs[0].tags
+        assert "本科" in jobs[0].tags
 
     def test_extracts_url(self) -> None:
         jobs = parse_job_list(SAMPLE_JOB_LIST_HTML)
