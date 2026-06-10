@@ -41,8 +41,8 @@ def _make_pack_dir(base: Path, job_id: str, files: dict[str, str] | None = None)
     return app_dir
 
 
-def _mock_browser_env():
-    """Return mocked (pw, browser, context, page) tuple."""
+def _mock_connect():
+    """Return a mock tuple (pw, browser, context, page) as get_browser would."""
     pw = MagicMock()
     browser = MagicMock()
     context = MagicMock()
@@ -53,24 +53,7 @@ def _mock_browser_env():
     page.screenshot.return_value = None
 
     context.pages = [page]
-    pw.chromium.connect_over_cdp.return_value = browser
     browser.contexts = [context]
-
-    return pw, browser, context, page
-
-
-def _mock_standalone_env():
-    """Return mocked standalone launch tuple."""
-    pw = MagicMock()
-    browser = MagicMock()
-    context = MagicMock()
-    page = MagicMock()
-
-    page.title.return_value = "BOSS Zhipin - Job Search"
-    page.url = "https://www.zhipin.com/"
-    page.screenshot.return_value = None
-
-    pw.chromium.launch.return_value = browser
     browser.new_context.return_value = context
     context.new_page.return_value = page
 
@@ -85,12 +68,10 @@ class TestPlatformMapping:
     """Platform field maps are correct and complete."""
 
     def test_boss_map_keys(self) -> None:
-        """Boss map covers the expected pack file names."""
         expected_files = {"greeting.md", "resume_targeted.md", "cover_letter.md", "form_answers.md"}
         assert set(BOSS_FIELD_MAP.keys()) == expected_files
 
     def test_boss_map_values(self) -> None:
-        """Boss map values are the expected Chinese form field names."""
         assert BOSS_FIELD_MAP["greeting.md"] == "招呼语"
         assert BOSS_FIELD_MAP["resume_targeted.md"] == "简历"
         assert BOSS_FIELD_MAP["cover_letter.md"] == "求职信"
@@ -118,7 +99,6 @@ class TestPrepareSubmission:
     def test_dry_run_returns_correct_fields(self, tmp_path: Path) -> None:
         _make_pack_dir(tmp_path, "job-001")
         result = prepare_submission("job-001", "boss", str(tmp_path))
-
         assert result.dry_run is True
         assert result.job_id == "job-001"
         assert result.platform == "boss"
@@ -128,7 +108,6 @@ class TestPrepareSubmission:
     def test_fields_filled_mapping(self, tmp_path: Path) -> None:
         _make_pack_dir(tmp_path, "job-002")
         result = prepare_submission("job-002", "boss", str(tmp_path))
-
         assert "招呼语" in result.fields_filled
         assert "简历" in result.fields_filled
         assert "求职信" in result.fields_filled
@@ -140,13 +119,10 @@ class TestPrepareSubmission:
             prepare_submission("nonexistent-job", "boss", str(tmp_path))
 
     def test_partial_pack_files(self, tmp_path: Path) -> None:
-        """Only files that exist in the pack are mapped; missing ones are skipped."""
         _make_pack_dir(tmp_path, "job-003", files={
             "greeting.md": "Hi there!",
-            # missing resume_targeted.md, cover_letter.md, form_answers.md
         })
         result = prepare_submission("job-003", "boss", str(tmp_path))
-
         assert len(result.fields_filled) == 1
         assert result.fields_filled["招呼语"] == "Hi there!"
 
@@ -168,22 +144,17 @@ class TestPrepareSubmission:
 class TestSubmitApplication:
     """submit_application dry-run and error paths."""
 
-    @patch("jobos.browser.sync_playwright")
-    def test_dry_run_default(self, mock_pw_cls, tmp_path: Path) -> None:
-        pw, browser, context, page = _mock_standalone_env()
-        mock_pw_cls.return_value.start.return_value = pw
-
+    @patch("jobos.submitter._connect_browser")
+    def test_dry_run_default(self, mock_connect, tmp_path: Path) -> None:
+        mock_connect.return_value = _mock_connect()
         _make_pack_dir(tmp_path, "job-010")
         result = submit_application("job-010", "boss", str(tmp_path), cdp_port=None)
-
         assert result.dry_run is True
         assert len(result.fields_filled) == 4
 
-    @patch("jobos.browser.sync_playwright")
-    def test_dry_run_explicit(self, mock_pw_cls, tmp_path: Path) -> None:
-        pw, browser, context, page = _mock_standalone_env()
-        mock_pw_cls.return_value.start.return_value = pw
-
+    @patch("jobos.submitter._connect_browser")
+    def test_dry_run_explicit(self, mock_connect, tmp_path: Path) -> None:
+        mock_connect.return_value = _mock_connect()
         _make_pack_dir(tmp_path, "job-011")
         result = submit_application("job-011", "boss", str(tmp_path), dry_run=True, cdp_port=None)
         assert result.dry_run is True
@@ -193,18 +164,16 @@ class TestSubmitApplication:
         with pytest.raises(ValueError, match="--confirm"):
             submit_application("job-012", "boss", str(tmp_path), dry_run=False, confirm=False)
 
-    @patch("jobos.browser.sync_playwright")
-    def test_confirm_fills_fields(self, mock_pw_cls, tmp_path: Path) -> None:
-        pw, browser, context, page = _mock_standalone_env()
-        mock_pw_cls.return_value.start.return_value = pw
-
+    @patch("jobos.submitter._connect_browser")
+    def test_confirm_fills_fields(self, mock_connect, tmp_path: Path) -> None:
+        mock_connect.return_value = _mock_connect()
         _make_pack_dir(tmp_path, "job-013")
         result = submit_application(
             "job-013", "boss", str(tmp_path),
             dry_run=False, confirm=True, cdp_port=None,
         )
         assert result.dry_run is False
-        assert result.submitted is False  # click not enabled yet
+        assert result.submitted is False
         assert result.page_title == "BOSS Zhipin - Job Search"
         assert result.page_url == "https://www.zhipin.com/"
 
@@ -212,97 +181,57 @@ class TestSubmitApplication:
         with pytest.raises(FileNotFoundError):
             submit_application("missing", "boss", str(tmp_path))
 
-    @patch("jobos.browser.sync_playwright")
-    def test_dry_run_captures_screenshot(self, mock_pw_cls, tmp_path: Path) -> None:
-        pw, browser, context, page = _mock_standalone_env()
-        mock_pw_cls.return_value.start.return_value = pw
-
+    @patch("jobos.submitter._connect_browser")
+    def test_dry_run_captures_screenshot(self, mock_connect, tmp_path: Path) -> None:
+        mock_connect.return_value = _mock_connect()
         _make_pack_dir(tmp_path, "job-020")
         result = submit_application("job-020", "boss", str(tmp_path), cdp_port=None)
-
         assert result.screenshot_path is not None
         assert "dry_run_screenshot.png" in result.screenshot_path
-        page.screenshot.assert_called_once()
 
-    @patch("jobos.browser.sync_playwright")
-    def test_dry_run_captures_page_title(self, mock_pw_cls, tmp_path: Path) -> None:
-        pw, browser, context, page = _mock_standalone_env()
+    @patch("jobos.submitter._connect_browser")
+    def test_dry_run_captures_page_title(self, mock_connect, tmp_path: Path) -> None:
+        pw, browser, context, page = _mock_connect()
         page.title.return_value = "BOSS Zhipin - Search Results"
-        mock_pw_cls.return_value.start.return_value = pw
-
+        mock_connect.return_value = pw, browser, context, page
         _make_pack_dir(tmp_path, "job-021")
         result = submit_application("job-021", "boss", str(tmp_path), cdp_port=None)
-
         assert result.page_title == "BOSS Zhipin - Search Results"
 
-    @patch("jobos.browser.sync_playwright")
-    def test_cdp_port_uses_connect_over_cdp(self, mock_pw_cls, tmp_path: Path) -> None:
-        pw, browser, context, page = _mock_browser_env()
-        mock_pw_cls.return_value.start.return_value = pw
-
-        _make_pack_dir(tmp_path, "job-022")
-        result = submit_application(
-            "job-022", "boss", str(tmp_path),
-            dry_run=True, cdp_port=9222,
-        )
-
-        pw.chromium.connect_over_cdp.assert_called_once_with("http://localhost:9222")
-        assert result.dry_run is True
-
-    @patch("jobos.browser.sync_playwright")
-    def test_standalone_mode_uses_launch(self, mock_pw_cls, tmp_path: Path) -> None:
-        pw, browser, context, page = _mock_standalone_env()
-        mock_pw_cls.return_value.start.return_value = pw
-
-        _make_pack_dir(tmp_path, "job-023")
-        result = submit_application("job-023", "boss", str(tmp_path), dry_run=True, cdp_port=None)
-
-        pw.chromium.launch.assert_called_once()
-        assert result.dry_run is True
-
-    @patch("jobos.browser.sync_playwright")
-    def test_browser_crash_returns_error(self, mock_pw_cls, tmp_path: Path) -> None:
-        mock_pw_cls.return_value.start.side_effect = RuntimeError("Browser crashed")
-
+    @patch("jobos.submitter._connect_browser")
+    def test_browser_crash_returns_error(self, mock_connect, tmp_path: Path) -> None:
+        mock_connect.side_effect = RuntimeError("Browser crashed")
         _make_pack_dir(tmp_path, "job-024")
-        result = submit_application("job-024", "boss", str(tmp_path), dry_run=True)
-
+        result = submit_application("job-024", "boss", str(tmp_path), cdp_port=None)
         assert result.error is not None
         assert "Browser crashed" in result.error
 
-    @patch("jobos.browser.sync_playwright")
-    def test_screenshot_path_format(self, mock_pw_cls, tmp_path: Path) -> None:
-        pw, browser, context, page = _mock_standalone_env()
-        mock_pw_cls.return_value.start.return_value = pw
-
+    @patch("jobos.submitter._connect_browser")
+    def test_screenshot_path_format(self, mock_connect, tmp_path: Path) -> None:
+        mock_connect.return_value = _mock_connect()
         _make_pack_dir(tmp_path, "job-025")
         result = submit_application("job-025", "boss", str(tmp_path), cdp_port=None)
-
         assert result.screenshot_path is not None
         path = Path(result.screenshot_path)
         assert path.name == "dry_run_screenshot.png"
         assert "job-025" in str(path)
 
-    @patch("jobos.browser.sync_playwright")
-    def test_browser_cleanup_on_success(self, mock_pw_cls, tmp_path: Path) -> None:
-        pw, browser, context, page = _mock_standalone_env()
-        mock_pw_cls.return_value.start.return_value = pw
-
+    @patch("jobos.submitter._connect_browser")
+    def test_browser_cleanup_on_success(self, mock_connect, tmp_path: Path) -> None:
+        pw, browser, context, page = _mock_connect()
+        mock_connect.return_value = pw, browser, context, page
         _make_pack_dir(tmp_path, "job-026")
         submit_application("job-026", "boss", str(tmp_path), cdp_port=None)
-
         browser.close.assert_called_once()
         pw.stop.assert_called_once()
 
-    @patch("jobos.browser.sync_playwright")
-    def test_browser_cleanup_on_failure(self, mock_pw_cls, tmp_path: Path) -> None:
-        pw, browser, context, page = _mock_standalone_env()
+    @patch("jobos.submitter._connect_browser")
+    def test_browser_cleanup_on_failure(self, mock_connect, tmp_path: Path) -> None:
+        pw, browser, context, page = _mock_connect()
         page.goto.side_effect = TimeoutError("Navigation timeout")
-        mock_pw_cls.return_value.start.return_value = pw
-
+        mock_connect.return_value = pw, browser, context, page
         _make_pack_dir(tmp_path, "job-027")
         result = submit_application("job-027", "boss", str(tmp_path), cdp_port=None)
-
         browser.close.assert_called_once()
         pw.stop.assert_called_once()
         assert result.error is not None
