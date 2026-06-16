@@ -78,6 +78,18 @@ def main():
     # job queue
     subparsers.add_parser("queue", help="Show jobs grouped by pipeline stage")
 
+    # job loop-plan
+    p_loop_plan = subparsers.add_parser("loop-plan", help="Create a read-only automation loop plan")
+    p_loop_plan.add_argument("--max-jobs", type=int, default=10, help="Maximum planned actions")
+    p_loop_plan.add_argument("--output", help="Output path (default: pipeline_runs/<run_id>/plan.json)")
+
+    # job loop-run
+    p_loop_run = subparsers.add_parser("loop-run", help="Run the automation loop")
+    p_loop_run.add_argument("--dry-run", action="store_true", help="Run non-browser stages only")
+    p_loop_run.add_argument("--max-jobs", type=int, default=10, help="Maximum jobs to process")
+    p_loop_run.add_argument("--output", help="Run directory (default: pipeline_runs/<run_id>/)")
+    p_loop_run.add_argument("--resume", help="Resume an existing run directory")
+
     # job recommend
     p_rec = subparsers.add_parser("recommend", help="Rank scored jobs")
     p_rec.add_argument("--top", type=int, default=5, help="Number of results")
@@ -135,6 +147,72 @@ def main():
     p_auto.add_argument("--interval-min", type=int, default=30, help="Min seconds between submissions")
     p_auto.add_argument("--interval-max", type=int, default=120, help="Max seconds between submissions")
 
+    # job start — full automation pipeline
+    p_start = subparsers.add_parser("start", help="Start full automation pipeline (LLM-guided)")
+    p_start.add_argument("--keyword", help="Search keyword (e.g. 'Python开发')")
+    p_start.add_argument("--max-jobs", type=int, default=10, help="Max successful submissions")
+    p_start.add_argument("--dry-run", action="store_true", help="Analyze only, don't submit")
+    p_start.add_argument("--port", type=int, default=9222, help="Chrome CDP port")
+    p_start.add_argument("--headless", action="store_true")
+    p_start.add_argument("--provider", choices=["anthropic", "openai"], help="LLM provider")
+    p_start.add_argument("--api-key", help="API key (or use JOBOS_API_KEY env)")
+    p_start.add_argument("--base-url", help="API base URL (or use JOBOS_BASE_URL env)")
+    p_start.add_argument("--model", help="Model name override")
+
+    # job auto-reply — monitor and auto-reply to recruiter messages
+    p_reply = subparsers.add_parser("auto-reply", help="Auto-reply to recruiter messages on BOSS Zhipin")
+    p_reply.add_argument("--interval", type=int, default=60, help="Seconds between checks")
+    p_reply.add_argument("--max-replies", type=int, default=20, help="Max replies before stopping")
+    p_reply.add_argument("--dry-run", action="store_true", help="Generate replies but don't send")
+    p_reply.add_argument("--port", type=int, default=9222, help="Chrome CDP port")
+    p_reply.add_argument("--headless", action="store_true")
+    p_reply.add_argument("--provider", choices=["anthropic", "openai"], help="LLM provider")
+    p_reply.add_argument("--api-key", help="API key")
+    p_reply.add_argument("--base-url", help="API base URL")
+    p_reply.add_argument("--model", help="Model name override")
+
+    # job onboard — interactive profile setup with AI
+    p_onboard = subparsers.add_parser("onboard", help="Interactive AI-guided profile setup")
+    p_onboard.add_argument("--provider", choices=["anthropic", "openai"], help="LLM provider")
+    p_onboard.add_argument("--api-key", help="API key")
+    p_onboard.add_argument("--base-url", help="API base URL")
+    p_onboard.add_argument("--model", help="Model name override")
+
+    # job chat — standalone LLM conversation
+    p_chat = subparsers.add_parser("chat", help="Chat with AI assistant")
+    p_chat.add_argument("--provider", choices=["anthropic", "openai"], help="LLM provider")
+    p_chat.add_argument("--api-key", help="API key")
+    p_chat.add_argument("--base-url", help="API base URL")
+    p_chat.add_argument("--model", help="Model name override")
+
+    # job analyze — analyze a single job with LLM
+    p_analyze = subparsers.add_parser("analyze", help="Analyze job match with LLM")
+    p_analyze.add_argument("--job", required=True, help="Job ID")
+    p_analyze.add_argument("--provider", choices=["anthropic", "openai"], help="LLM provider")
+    p_analyze.add_argument("--api-key", help="API key")
+    p_analyze.add_argument("--base-url", help="API base URL")
+    p_analyze.add_argument("--model", help="Model name override")
+
+    # job tui — launch REPL
+    subparsers.add_parser("tui", help="Launch interactive REPL")
+
+    # job start-repl
+    subparsers.add_parser("start-repl", help="Launch interactive REPL (alias for tui)")
+
+    # job config
+    p_config = subparsers.add_parser("config", help="Manage configuration")
+    config_sub = p_config.add_subparsers(dest="config_command")
+    config_sub.add_parser("show", help="Show current config")
+    config_sub.add_parser("edit", help="Open config in editor")
+    config_sub.add_parser("wizard", help="Run interactive setup wizard")
+    config_sub.add_parser("path", help="Print config file path")
+    config_sub.add_parser("env-path", help="Print .env file path")
+    p_config_set = config_sub.add_parser("set", help="Set config value")
+    p_config_set.add_argument("key", help="Config key (dot notation, e.g. llm.provider)")
+    p_config_set.add_argument("value", help="Value to set")
+    p_config_get = config_sub.add_parser("get", help="Get config value")
+    p_config_get.add_argument("key", help="Config key")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -159,6 +237,8 @@ def _dispatch(args):
         "doctor": _cmd_doctor,
         "demo-seed": _cmd_demo_seed,
         "queue": _cmd_queue,
+        "loop-plan": _cmd_loop_plan,
+        "loop-run": _cmd_loop_run,
         "recommend": _cmd_recommend,
         "paste": _cmd_paste,
         "validate-pack": _cmd_validate_pack,
@@ -170,6 +250,14 @@ def _dispatch(args):
         "submit": _cmd_submit,
         "retro-freeform": _cmd_retro_freeform,
         "auto-submit": _cmd_auto_submit,
+        "start": _cmd_start,
+        "chat": _cmd_chat,
+        "analyze": _cmd_analyze,
+        "tui": _cmd_tui,
+        "start-repl": _cmd_tui,
+        "config": _cmd_config,
+        "auto-reply": _cmd_auto_reply,
+        "onboard": _cmd_onboard,
     }
     handler = handlers.get(args.command)
     if handler:
@@ -227,6 +315,8 @@ def _cmd_init(args):
 
     print(f"Created directory structure at {root}")
     print("Done. Edit profile/ files and rubrics/ to get started.")
+    print()
+    print("Tip: Run `job init --onboard` to let AI guide you through profile setup.")
 
 
 def _cmd_import(args):
@@ -793,6 +883,47 @@ def _cmd_queue(args):
         print("No jobs in queue. Import a job with: job import --file <path>")
 
 
+def _cmd_loop_plan(args):
+    from .loop import write_loop_plan
+
+    root = _get_root()
+    try:
+        output_path = write_loop_plan(
+            state_dir=root,
+            output=getattr(args, "output", None),
+            max_jobs=getattr(args, "max_jobs", 10),
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Loop plan written: {output_path}")
+
+
+def _cmd_loop_run(args):
+    from .loop import run_loop
+
+    root = _get_root()
+    try:
+        summary = run_loop(
+            state_dir=root,
+            dry_run=getattr(args, "dry_run", False),
+            output=getattr(args, "output", None),
+            max_jobs=getattr(args, "max_jobs", 10),
+            resume=getattr(args, "resume", None),
+        )
+    except (FileNotFoundError, NotImplementedError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Loop run written: {summary['run_dir']}")
+    print(f"  Started: {summary['counts']['started']}")
+    print(f"  Succeeded: {summary['counts']['succeeded']}")
+    print(f"  Failed: {summary['counts']['failed']}")
+    print(f"  Skipped: {summary['counts']['skipped']}")
+    print(f"  Retried: {summary['counts']['retried']}")
+
+
 def _cmd_recommend(args):
     from .recommend import recommend_jobs
 
@@ -1174,6 +1305,7 @@ def _cmd_auto_submit(args):
 
 def _cmd_boss_import(args):
     from .boss_import import import_from_boss
+    from .config import load_config
     from datetime import datetime, timezone
     import re as _re
 
@@ -1181,9 +1313,18 @@ def _cmd_boss_import(args):
     keyword = args.keyword
     city_code = args.city
     port = args.port
+    extraction_config = load_config().get("extraction", {})
 
     try:
-        jobs = import_from_boss(keyword, city_code, port)
+        jobs = import_from_boss(
+            keyword,
+            city_code,
+            port,
+            use_scrapling=extraction_config.get("use_scrapling", True),
+            record_diagnostics=extraction_config.get("record_diagnostics", True),
+            include_html_snapshot=extraction_config.get("include_html_snapshot", True),
+            html_snapshot_limit=extraction_config.get("html_snapshot_limit", 250000),
+        )
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -1229,6 +1370,12 @@ def _cmd_boss_import(args):
             "keyword": keyword,
             "link": job.get("link", ""),
         }
+        if job.get("extractor"):
+            state["jobs"][job_id]["extractor"] = job["extractor"]
+        if job.get("page_state"):
+            state["jobs"][job_id]["page_state"] = job["page_state"]
+        if job.get("extraction_diagnostics"):
+            state["jobs"][job_id]["extraction_diagnostics"] = job["extraction_diagnostics"]
         imported += 1
 
     state_path.write_text(json.dumps(state, indent=2) + "\n")
@@ -1238,3 +1385,207 @@ def _cmd_boss_import(args):
         print(f"  - {job['title']} @ {job['company']}  {job['salary']}")
     print(f"\nRaw files saved to: jobs/raw/")
     print(f"State updated: .job-state.json")
+
+
+def _build_llm_config(args) -> dict:
+    """从CLI参数构建LLM配置"""
+    config = {}
+    if hasattr(args, "provider") and args.provider:
+        config["provider"] = args.provider
+    if hasattr(args, "api_key") and args.api_key:
+        config["api_key"] = args.api_key
+    if hasattr(args, "base_url") and args.base_url:
+        config["base_url"] = args.base_url
+    if hasattr(args, "model") and args.model:
+        config["model"] = args.model
+    return config if config else None
+
+
+def _cmd_start(args):
+    from .orchestrator import run_full_pipeline
+
+    root = _get_root()
+    config = _build_llm_config(args)
+
+    result = run_full_pipeline(
+        state_dir=str(root),
+        cdp_port=args.port,
+        max_jobs=args.max_jobs,
+        dry_run=args.dry_run,
+        config=config,
+        search_keyword=args.keyword or "",
+        headless=args.headless,
+    )
+
+    if result.get("error"):
+        sys.exit(1)
+
+
+def _cmd_chat(args):
+    from .llm.provider import get_llm_adapter
+    from .llm.conversation import Conversation
+    from .llm.prompts import INTRO_SYSTEM
+
+    config = _build_llm_config(args)
+    llm = get_llm_adapter(config)
+
+    print("\n🤖 AI助手已就绪。输入 'quit' 退出。\n")
+
+    conv = Conversation(llm)
+
+    while True:
+        try:
+            user_input = input("你: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n再见！")
+            break
+
+        if user_input.lower() in ("quit", "exit", "q"):
+            print("再见！")
+            break
+
+        if not user_input:
+            continue
+
+        reply = conv.chat(user_input, system=INTRO_SYSTEM)
+        print(f"\nAI: {reply}\n")
+
+
+def _cmd_analyze(args):
+    from .llm.provider import get_llm_adapter
+    from .llm.job_analyzer import analyze_match, explain_scores, check_scam
+    from .profile_loader import load_profile
+    import yaml
+
+    root = _get_root()
+    job_id = args.job
+    config = _build_llm_config(args)
+
+    # Load job data
+    state_path = root / ".job-state.json"
+    if not state_path.exists():
+        print("Error: No .job-state.json found. Run `job init` first.", file=sys.stderr)
+        sys.exit(1)
+
+    state = json.loads(state_path.read_text())
+    job_entry = state.get("jobs", {}).get(job_id)
+    if not job_entry:
+        print(f"Error: Job {job_id} not found.", file=sys.stderr)
+        sys.exit(1)
+
+    # Try loading normalized job data
+    job_yaml = root / "jobs" / "normalized" / f"{job_id}.yaml"
+    job_json = root / "jobs" / "raw" / f"{job_id}.json"
+    if job_yaml.exists():
+        job_data = yaml.safe_load(job_yaml.read_text())
+    elif job_json.exists():
+        job_data = json.loads(job_json.read_text())
+    else:
+        job_data = {"job_id": job_id, **job_entry}
+
+    profile = load_profile(str(root))
+    llm = get_llm_adapter(config)
+
+    print(f"\n📊 分析职位: {job_data.get('title', job_id)}")
+    print(f"   公司: {job_data.get('company', '未知')}\n")
+
+    # Scam check
+    print("🔒 反诈检查...")
+    scam = check_scam(llm, json.dumps(job_data, ensure_ascii=False))
+    risk = scam.get("risk_level", "unknown")
+    emoji = {"low": "✅", "medium": "⚠️", "high": "❌", "critical": "🚫"}.get(risk, "❓")
+    print(f"   {emoji} 风险等级: {risk}")
+    if scam.get("red_flags"):
+        print(f"   红线: {scam['red_flags']}")
+    if scam.get("suspect_signals"):
+        print(f"   可疑: {scam['suspect_signals']}")
+    print()
+
+    # Match analysis
+    print("📊 匹配度分析...")
+    match = analyze_match(llm, job_data, profile)
+    print(f"   总分: {match.get('total_score', '?')}/100")
+    print(f"   结论: {match.get('verdict', '未知')}")
+    if match.get("breakdown"):
+        print("   维度:")
+        for dim, score in match["breakdown"].items():
+            print(f"     {dim}: {score}")
+    if match.get("strengths"):
+        print(f"   优势: {', '.join(match['strengths'])}")
+    if match.get("weaknesses"):
+        print(f"   劣势: {', '.join(match['weaknesses'])}")
+    print()
+
+    # Explanation
+    print("💡 分析解读...")
+    explanation = explain_scores(llm, match, job_data, profile)
+    print(f"   {explanation}")
+
+
+def _cmd_tui(args):
+    from .repl import run_repl
+
+    root = _get_root()
+    run_repl(str(root))
+
+
+def _cmd_config(args):
+    from .config import print_config, set_config_value, get_config_value, config_wizard, CONFIG_FILE, ENV_FILE
+    import subprocess
+
+    cmd = getattr(args, "config_command", None)
+
+    if cmd == "show" or cmd is None:
+        if not CONFIG_FILE.exists():
+            print(f"配置文件不存在: {CONFIG_FILE}")
+            print("运行 `job config wizard` 进行初始配置。")
+            return
+        print_config()
+
+    elif cmd == "edit":
+        subprocess.run(["xdg-open", str(CONFIG_FILE)])
+
+    elif cmd == "wizard":
+        config_wizard()
+
+    elif cmd == "path":
+        print(CONFIG_FILE)
+
+    elif cmd == "env-path":
+        print(ENV_FILE)
+
+    elif cmd == "set":
+        key = args.key
+        value = args.value
+        set_config_value(key, value)
+        print(f"✅ {key} = {value}")
+
+    elif cmd == "get":
+        val = get_config_value(args.key)
+        print(f"{args.key} = {val}")
+
+
+def _cmd_auto_reply(args):
+    """启动自动回复"""
+    from .auto_reply import run_auto_reply_loop
+    config = _build_llm_config(args)
+    root = Path.cwd()
+    result = run_auto_reply_loop(
+        state_dir=str(root),
+        config=config,
+        interval=args.interval,
+        max_replies=args.max_replies,
+        dry_run=args.dry_run,
+        cdp_port=args.port,
+        headless=args.headless,
+    )
+    if result.get("error"):
+        print(f"❌ 错误: {result['error']}")
+
+
+def _cmd_onboard(args):
+    """启动AI引导的信息收集"""
+    from .onboarding import run_onboarding
+    config = _build_llm_config(args)
+    root = Path.cwd()
+    run_onboarding(state_dir=str(root), config=config)

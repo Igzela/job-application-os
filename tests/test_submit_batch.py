@@ -191,6 +191,26 @@ class TestAutoSubmitSingle:
         assert result.error == "No job URL found in job data"
         assert result.dry_run is True
 
+    def test_submit_attempt_is_persisted_for_error(self, tmp_path: Path) -> None:
+        page = _mock_page()
+        job_data = {"job_id": "j-attempt-error", "title": "Dev", "company": "Acme", "link": ""}
+        result = auto_submit_single(
+            page=page,
+            job_data=job_data,
+            pack_files={"greeting.md": "Hi"},
+            state_dir=str(tmp_path),
+            dry_run=True,
+        )
+
+        assert result.attempt_path is not None
+        attempt = json.loads(Path(result.attempt_path).read_text(encoding="utf-8"))
+        assert attempt["job_id"] == "j-attempt-error"
+        assert attempt["mode"] == "dry_run"
+        assert attempt["status"] == "failed"
+        assert attempt["error_class"] == "no_url"
+        assert attempt["started_at"]
+        assert attempt["finished_at"]
+
     def test_dry_run_succeeds_with_valid_job(self, tmp_path: Path) -> None:
         page = _mock_page()
         job_data = {
@@ -209,6 +229,58 @@ class TestAutoSubmitSingle:
         assert result.dry_run is True
         assert result.job_id == "j2"
         assert result.error is None
+
+    def test_submit_attempt_is_persisted_for_success(self, tmp_path: Path) -> None:
+        page = _mock_page()
+        job_data = {
+            "job_id": "j-attempt-ok",
+            "title": "Engineer",
+            "company": "Beta",
+            "link": "https://www.zhipin.com/web/geek/job_detail/j-attempt-ok.html",
+        }
+        result = auto_submit_single(
+            page=page,
+            job_data=job_data,
+            pack_files={"greeting.md": "Hello!"},
+            state_dir=str(tmp_path),
+            dry_run=True,
+        )
+
+        assert result.attempt_path is not None
+        attempt = json.loads(Path(result.attempt_path).read_text(encoding="utf-8"))
+        assert attempt["status"] == "succeeded"
+        assert attempt["error"] is None
+        assert attempt["error_class"] is None
+        assert attempt["result"]["page_url"] == page.url
+
+    def test_submit_attempt_records_page_diagnostics(self, tmp_path: Path) -> None:
+        page = _mock_page()
+        page.content.return_value = """
+        <html><body>
+          <div class="job-detail-header"><span class="name">Engineer</span></div>
+          <div class="chat-editor"><textarea placeholder="Say hello"></textarea></div>
+        </body></html>
+        """
+        job_data = {
+            "job_id": "j-page-state",
+            "title": "Engineer",
+            "company": "Beta",
+            "link": "https://www.zhipin.com/web/geek/job_detail/j-page-state.html",
+        }
+
+        result = auto_submit_single(
+            page=page,
+            job_data=job_data,
+            pack_files={"greeting.md": "Hello!"},
+            state_dir=str(tmp_path),
+            dry_run=True,
+        )
+
+        attempt = json.loads(Path(result.attempt_path).read_text(encoding="utf-8"))
+        assert attempt["page_state"] == "normal"
+        assert attempt["extractor"] in {"scrapling", "beautifulsoup"}
+        assert attempt["page_diagnostics"][0]["phase"] == "after_navigation"
+        assert attempt["page_diagnostics"][0]["classification"]["state"] == "normal"
 
     def test_dry_run_does_not_click_send(self, tmp_path: Path) -> None:
         page = _mock_page()

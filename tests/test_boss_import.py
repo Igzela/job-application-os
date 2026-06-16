@@ -9,6 +9,9 @@ import pytest
 from jobos.boss_import import import_from_boss
 
 
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
 SAMPLE_OUTPUT = {
     "url": "https://www.zhipin.com/web/geek/job?query=AIGC&city=100010000",
     "title": "BOSS Zhipin Search",
@@ -145,6 +148,41 @@ class TestImportFromBoss:
                 assert field in job, f"Missing field: {field}"
             assert isinstance(job["tags"], list)
 
+    @patch("jobos.boss_import.shutil.which", return_value="/usr/bin/node")
+    @patch("jobos.boss_import.subprocess.run")
+    def test_uses_python_extractor_when_html_is_available(self, mock_run, mock_which):
+        output = {
+            "url": SAMPLE_OUTPUT["url"],
+            "title": SAMPLE_OUTPUT["title"],
+            "items": [],
+            "diagnostics": {"cardCount": 1, "pageState": "normal"},
+            "html": (FIXTURES / "boss_job_list_normal.html").read_text(encoding="utf-8"),
+        }
+        mock_run.return_value = _mock_subprocess(json.dumps(output))
+
+        jobs = import_from_boss("AIGC", use_scrapling=False)
+
+        assert len(jobs) == 1
+        assert jobs[0]["title"] == "Python Developer"
+        assert jobs[0]["extractor"] == "beautifulsoup"
+        assert jobs[0]["page_state"] == "normal"
+        assert jobs[0]["extraction_diagnostics"]["item_count"] == 1
+
+    @patch("jobos.boss_import.shutil.which", return_value="/usr/bin/node")
+    @patch("jobos.boss_import.subprocess.run")
+    def test_html_login_state_raises_permission_error(self, mock_run, mock_which):
+        output = {
+            "url": "https://www.zhipin.com/",
+            "title": "BOSS Login",
+            "items": [],
+            "diagnostics": {},
+            "html": (FIXTURES / "boss_login.html").read_text(encoding="utf-8"),
+        }
+        mock_run.return_value = _mock_subprocess(json.dumps(output))
+
+        with pytest.raises(PermissionError, match="login required"):
+            import_from_boss("AIGC", use_scrapling=False)
+
 
 class TestBossImportCLI:
     """Integration tests for the `job boss-import` CLI command."""
@@ -174,6 +212,7 @@ class TestBossImportCLI:
         state = json.loads((tmp_path / ".job-state.json").read_text())
         boss_jobs = [v for v in state["jobs"].values() if v.get("source") == "boss_zhipin"]
         assert len(boss_jobs) == 2
+        assert all(job.get("extractor") == "node_cdp" for job in boss_jobs)
 
         # Check raw files were written
         raw_files = list((tmp_path / "jobs" / "raw").glob("*boss*"))

@@ -5,15 +5,16 @@
 # If a slider/captcha appears, solve it manually (human-in-the-loop).
 set -euo pipefail
 PORT="${1:-9222}"
-PROFILE="$HOME/.jobos-chrome-profile"
+PROFILE="${JOBOS_BROWSER_USER_DATA_DIR:-$HOME/.jobos-chrome-profile}"
+PROFILE_DIR="${JOBOS_BROWSER_PROFILE_DIRECTORY:-Profile 1}"
 CHROME="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium-browser || command -v chromium)"
 if [ -z "$CHROME" ]; then
   echo "Error: Chrome/Chromium not found. Install google-chrome or chromium." >&2
   exit 1
 fi
 mkdir -p "$PROFILE"
-echo "Launching Chrome (debug port $PORT, profile=$PROFILE)"
+echo "Launching Chrome (debug port $PORT, profile=$PROFILE, profile-dir=$PROFILE_DIR)"
 echo "=> Log into BOSS Zhipin in the browser window (QR scan)."
 echo "=> If a slider/captcha appears, solve it manually."
 echo "=> Then run: node read-boss.mjs \"AIGC\" 100010000 $PORT"
-exec "$CHROME" --remote-debugging-port="$PORT" --user-data-dir="$PROFILE" "https://www.zhipin.com"
+exec "$CHROME" --remote-debugging-port="$PORT" --user-data-dir="$PROFILE" --profile-directory="$PROFILE_DIR" "https://www.zhipin.com"

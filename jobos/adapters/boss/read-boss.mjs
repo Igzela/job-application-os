@@ -11,7 +11,7 @@
 // Usage: node read-boss.mjs <keyword> [city_code] [port]
 //   e.g. node read-boss.mjs "AIGC" 100010000 9222
 //
-// Output: JSON to stdout with { url, title, items[], diagnostics{} }
+// Output: JSON to stdout with { url, title, items[], diagnostics{}, html }
 // Items: { title, salary, company, tags[], link }
 //
 // Salary note: BOSS uses custom font (kanzhun-mix) to obfuscate salary digits
@@ -23,6 +23,8 @@ import http from 'node:http';
 const KEYWORD = process.argv[2];
 const CITY = process.argv[3] || '100010000'; // 100010000 = nationwide
 const PORT = process.argv[4] || '9222';
+const INCLUDE_HTML = process.env.JOBOS_BOSS_INCLUDE_HTML !== '0';
+const HTML_LIMIT = Number.parseInt(process.env.JOBOS_BOSS_HTML_LIMIT || '250000', 10);
 
 if (!KEYWORD) {
   console.error('Usage: node read-boss.mjs <keyword> [city_code] [port]\n  e.g. node read-boss.mjs "AIGC" 100010000 9222');
@@ -32,12 +34,26 @@ if (!KEYWORD) {
 function pageExtractor() {
   const out = { url: location.href, title: document.title, items: [], diagnostics: {} };
   const bodyText = (document.body.innerText || '');
+  const html = document.documentElement ? document.documentElement.outerHTML : '';
+  if (INCLUDE_HTML) {
+    out.html = html.slice(0, HTML_LIMIT);
+    out.diagnostics.htmlLength = html.length;
+    out.diagnostics.htmlTruncated = html.length > out.html.length;
+  }
 
   // Anti-scraping / login / verification detection
-  if (/请完成.*验证|安全验证|滑块验证|请输入验证码|验证后继续访问|拖动.*完成验证/.test(bodyText))
+  if (/请完成.*验证|安全验证|滑块验证|请输入验证码|验证后继续访问|拖动.*完成验证/.test(bodyText)) {
     out.diagnostics.blocked = 'Security verification detected. Solve it manually in the browser and retry.';
-  if (/登录后查看|立即登录|扫码登录|未登录/.test(bodyText) && bodyText.length < 1500)
+    out.diagnostics.pageState = 'verification_required';
+  }
+  if (/访问受限|异常访问|访问过于频繁|Access Denied|Forbidden|403/.test(bodyText)) {
+    out.diagnostics.accessLimited = 'Access appears limited or rate-limited. Pause and retry later.';
+    out.diagnostics.pageState = 'access_limited';
+  }
+  if (/登录后查看|立即登录|扫码登录|未登录/.test(bodyText) && bodyText.length < 1500) {
     out.diagnostics.maybeNeedLogin = 'Appears not logged in or results not loaded (page shows login prompt).';
+    out.diagnostics.pageState = 'login_required';
+  }
 
   const txt = (n) => (n ? (n.textContent || '').trim().replace(/\s+/g, ' ') : '');
 
@@ -73,6 +89,7 @@ function pageExtractor() {
 
   out.items = out.items.slice(0, 60);
   out.diagnostics.cardCount = cardEls.length;
+  if (!out.diagnostics.pageState) out.diagnostics.pageState = out.items.length ? 'normal' : 'empty';
   if (obfCount) out.diagnostics.salaryObfuscated = `${obfCount} salary values have obfuscated digits (placeholder used), units are visible. Open link for exact numbers.`;
   if (!out.items.length) {
     out.diagnostics.sampleRawText = bodyText.slice(0, 400);

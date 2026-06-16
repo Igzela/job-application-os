@@ -6,6 +6,12 @@ class MockLLMAdapter:
     def create(cls) -> "MockLLMAdapter":
         return cls()
 
+    def chat(self, messages: list[dict], system: str = "", temperature: float = 0.7) -> str:
+        if messages:
+            last = messages[-1]
+            return f"Mock response to: {last.get('content', '')[:100]}"
+        return "Mock response"
+
     def summarize_jd(self, jd_text: str) -> dict:
         return {"summary": jd_text[:200], "key_skills": [], "seniority": "intern"}
 

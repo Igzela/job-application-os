@@ -30,7 +30,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -51,13 +51,15 @@ PLATFORM_MAPS: Dict[str, Dict[str, str]] = {
 
 # BOSS Zhipin selectors -- best-effort, may need updating if the site changes
 CHAT_BUTTON_SELECTORS = [
-    'button.btn-startchat',
-    'button:has-text("立即沟通")',
     '.btn-startchat',
     '[class*="startchat"]',
+    'button.btn-startchat',
+    'button:has-text("立即沟通")',
     'button:has-text("沟通")',
 ]
 GREETING_SELECTORS = [
+    '[contenteditable="true"]',
+    '.chat-input',
     '.chat-editor textarea',
     '[class*="chat"] textarea',
     '.job-chat textarea',
@@ -66,6 +68,8 @@ GREETING_SELECTORS = [
     '#chat-input',
 ]
 SEND_BUTTON_SELECTORS = [
+    '.send-message',
+    '[class*="send-message"]',
     'button:has-text("发送")',
     '.chat-editor button[class*="send"]',
     '[class*="send-btn"]',
@@ -103,6 +107,7 @@ class SubmitResult:
     error: Optional[str] = None
     page_title: Optional[str] = None
     page_url: Optional[str] = None
+    attempt_path: Optional[str] = None
 
 
 @dataclass
@@ -167,14 +172,28 @@ def _click_chat_button(page) -> bool:
 
     Returns True if a button was found and clicked.
     """
+    import sys
+
     for selector in CHAT_BUTTON_SELECTORS:
         try:
-            btn = page.locator(selector).first
-            if btn.is_visible(timeout=3000):
+            locator = page.locator(selector)
+            btn = locator.first
+            count = locator.count()
+            if isinstance(count, int) and count == 0:
+                print(f"   🔍 {selector}: count=0", file=sys.stderr)
+                continue
+
+            visible = btn.is_visible(timeout=3000)
+            print(f"   🔍 {selector}: count={count}, visible={visible}", file=sys.stderr)
+            if visible:
+                # 先滚动到按钮位置
+                btn.scroll_into_view_if_needed()
+                _human_delay(0.5, 1.0)
                 btn.click()
                 _human_delay()
                 return True
-        except Exception:
+        except Exception as e:
+            print(f"   ⚠️ {selector}: {str(e)[:50]}", file=sys.stderr)
             continue
     return False
 
@@ -182,13 +201,37 @@ def _click_chat_button(page) -> bool:
 def _fill_greeting(page, greeting_text: str) -> bool:
     """Find the chat greeting textarea and fill it with *greeting_text*.
 
+    Uses human-like typing simulation instead of instant fill.
     Returns True if a textarea was found and filled.
     """
     for selector in GREETING_SELECTORS:
         try:
             textarea = page.locator(selector).first
             if textarea.is_visible(timeout=5000):
-                textarea.fill(greeting_text)
+                textarea.click()
+                _human_delay(0.3, 0.8)
+
+                # 检查是否是 contenteditable 元素
+                is_contenteditable = textarea.evaluate("el => el.contentEditable === 'true'")
+
+                if is_contenteditable:
+                    # contenteditable 元素需要点击后用 keyboard.type
+                    textarea.click()
+                    _human_delay(0.3, 0.5)
+                    # 全选清空
+                    page.keyboard.press("Control+a")
+                    _human_delay(0.1, 0.2)
+                    page.keyboard.press("Backspace")
+                    _human_delay(0.2, 0.4)
+                    # 逐字输入
+                    for char in greeting_text:
+                        page.keyboard.type(char, delay=random.randint(30, 80))
+                        if random.random() < 0.03:
+                            _human_delay(0.2, 0.5)
+                else:
+                    # 普通 textarea 使用 fill
+                    textarea.fill(greeting_text)
+
                 _human_delay()
                 return True
         except Exception:
@@ -221,6 +264,105 @@ def _take_screenshot(page, path: Path) -> Optional[str]:
         return str(path)
     except Exception:
         return None
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _classify_submit_error(error: Optional[str]) -> Optional[str]:
+    if not error:
+        return None
+    message = error.lower()
+    if "url" in message:
+        return "no_url"
+    if "chat" in message:
+        return "no_chat_button"
+    if "fill" in message or "textarea" in message:
+        return "fill_failed"
+    if "send" in message:
+        return "send_failed"
+    if "browser" in message or "cdp" in message:
+        return "browser_connect_failed"
+    return "submit_failed"
+
+
+def _write_submit_attempt(path: Path, record: Dict[str, Any]) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(record, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+def _submit_attempt_path(state_dir: str, job_id: str) -> Path:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    return Path(state_dir) / "applications" / job_id / "submit_attempts" / f"{stamp}.json"
+
+
+def _result_to_attempt_update(result: SubmitResult) -> Dict[str, Any]:
+    return {
+        "finished_at": _utc_now(),
+        "status": "failed" if result.error else "succeeded",
+        "result": {
+            "submitted": result.submitted,
+            "submitted_at": result.submitted_at,
+            "fields_filled": result.fields_filled,
+            "page_title": result.page_title,
+            "page_url": result.page_url,
+            "screenshot_path": result.screenshot_path,
+        },
+        "error": result.error,
+        "error_class": _classify_submit_error(result.error),
+        "screenshot_paths": [result.screenshot_path] if result.screenshot_path else [],
+    }
+
+
+def _capture_page_diagnostics(page, phase: str) -> Dict[str, Any]:
+    """Classify the current browser page when HTML content is available."""
+    try:
+        content_fn = getattr(page, "content", None)
+        html = content_fn() if callable(content_fn) else ""
+    except Exception as exc:
+        return {"phase": phase, "error": f"content_unavailable: {exc}"}
+    if not isinstance(html, str) or not html.strip():
+        return {}
+
+    try:
+        from .boss_parser import classify_boss_page, parse_chat_page, scrapling_available
+
+        page_url = getattr(page, "url", "")
+        title_fn = getattr(page, "title", None)
+        page_title = title_fn() if callable(title_fn) else ""
+        classification = classify_boss_page(html, url=page_url, title=page_title)
+        chat = parse_chat_page(html)
+        return {
+            "phase": phase,
+            "extractor": "scrapling" if scrapling_available() else "beautifulsoup",
+            "page_state": classification.state,
+            "classification": classification.to_dict(),
+            "recovery": classification.recovery,
+            "chat_fields": chat,
+        }
+    except Exception as exc:
+        return {"phase": phase, "error": f"classification_failed: {exc}"}
+
+
+def _record_page_diagnostics(attempt_record: Dict[str, Any], page, phase: str) -> None:
+    diagnostics = _capture_page_diagnostics(page, phase)
+    if not diagnostics:
+        return
+    attempt_record.setdefault("page_diagnostics", []).append(diagnostics)
+    if diagnostics.get("page_state"):
+        attempt_record["page_state"] = diagnostics["page_state"]
+    if diagnostics.get("extractor"):
+        attempt_record["extractor"] = diagnostics["extractor"]
+    recovery = diagnostics.get("recovery")
+    if recovery:
+        signals = attempt_record.setdefault("recovery_signals", [])
+        if recovery not in signals:
+            signals.append(recovery)
 
 
 # ---------------------------------------------------------------------------
@@ -260,15 +402,38 @@ def auto_submit_single(
     job_url = job_data.get("link", "")
     platform = "boss"
     greeting_text = pack_files.get("greeting.md", "")
+    attempt_path = _submit_attempt_path(state_dir, job_id)
+    attempt_record: Dict[str, Any] = {
+        "schema_version": 1,
+        "job_id": job_id,
+        "url": job_url,
+        "platform": platform,
+        "mode": "dry_run" if dry_run else "live",
+        "started_at": _utc_now(),
+        "status": "started",
+        "result": None,
+        "error": None,
+        "error_class": None,
+        "screenshot_paths": [],
+        "page_state": None,
+        "extractor": None,
+        "page_diagnostics": [],
+        "recovery_signals": [],
+    }
+    _write_submit_attempt(attempt_path, attempt_record)
 
     if not job_url:
-        return SubmitResult(
+        result = SubmitResult(
             job_id=job_id,
             platform=platform,
             dry_run=dry_run,
             fields_filled=pack_files,
             error="No job URL found in job data",
+            attempt_path=str(attempt_path),
         )
+        attempt_record.update(_result_to_attempt_update(result))
+        _write_submit_attempt(attempt_path, attempt_record)
+        return result
 
     fields_filled: Dict[str, str] = {}
     screenshot_dir = Path(state_dir) / "applications" / job_id
@@ -276,6 +441,7 @@ def auto_submit_single(
     try:
         # 1. Navigate to job page
         _open_job_page(page, job_url)
+        _record_page_diagnostics(attempt_record, page, "after_navigation")
 
         pre_screenshot = _take_screenshot(
             page, screenshot_dir / "pre_submit_screenshot.png"
@@ -283,8 +449,9 @@ def auto_submit_single(
 
         # 2. Click the "start chat" button
         chat_clicked = _click_chat_button(page)
+        _record_page_diagnostics(attempt_record, page, "after_chat_click")
         if not chat_clicked:
-            return SubmitResult(
+            result = SubmitResult(
                 job_id=job_id,
                 platform=platform,
                 dry_run=dry_run,
@@ -293,13 +460,18 @@ def auto_submit_single(
                 error="Could not find 'start chat' button on page",
                 page_title=page.title(),
                 page_url=page.url,
+                attempt_path=str(attempt_path),
             )
+            attempt_record.update(_result_to_attempt_update(result))
+            _write_submit_attempt(attempt_path, attempt_record)
+            return result
 
         _human_delay()
 
         # 3. Fill greeting text
         if greeting_text:
             filled = _fill_greeting(page, greeting_text)
+            _record_page_diagnostics(attempt_record, page, "after_fill")
             if filled:
                 fields_filled["招呼语"] = greeting_text
             # If we can't find the textarea, that's OK -- we still screenshot
@@ -314,6 +486,7 @@ def auto_submit_single(
         submitted_at = None
         if not dry_run and confirm:
             sent = _click_send(page)
+            _record_page_diagnostics(attempt_record, page, "after_send")
             if sent:
                 submitted = True
                 submitted_at = datetime.now(timezone.utc).isoformat()
@@ -321,7 +494,7 @@ def auto_submit_single(
                     page, screenshot_dir / "post_send_screenshot.png"
                 )
 
-        return SubmitResult(
+        result = SubmitResult(
             job_id=job_id,
             platform=platform,
             dry_run=dry_run,
@@ -331,20 +504,29 @@ def auto_submit_single(
             submitted_at=submitted_at,
             page_title=page.title(),
             page_url=page.url,
+            attempt_path=str(attempt_path),
         )
+        attempt_record.update(_result_to_attempt_update(result))
+        _write_submit_attempt(attempt_path, attempt_record)
+        return result
 
     except Exception as e:
+        _record_page_diagnostics(attempt_record, page, "on_error")
         error_screenshot = _take_screenshot(
             page, screenshot_dir / "error_screenshot.png"
         )
-        return SubmitResult(
+        result = SubmitResult(
             job_id=job_id,
             platform=platform,
             dry_run=dry_run,
             fields_filled=fields_filled,
             screenshot_path=error_screenshot,
             error=str(e),
+            attempt_path=str(attempt_path),
         )
+        attempt_record.update(_result_to_attempt_update(result))
+        _write_submit_attempt(attempt_path, attempt_record)
+        return result
 
 
 # ---------------------------------------------------------------------------

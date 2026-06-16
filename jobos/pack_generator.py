@@ -220,6 +220,19 @@ def _generate_prediction_summary(prediction: dict) -> str:
     return "\n".join(lines)
 
 
+def _format_language(language: Any) -> str:
+    """Return a display string for profile language entries."""
+    if isinstance(language, str):
+        return language
+    if isinstance(language, dict):
+        name = language.get("name") or language.get("language") or ""
+        level = language.get("level") or language.get("proficiency") or ""
+        if name and level:
+            return f"{name} ({level})"
+        return str(name or level)
+    return str(language)
+
+
 def _generate_resume(
     profile: dict,
     evidence: list[dict],
@@ -245,8 +258,11 @@ def _generate_resume(
         contact_parts.append(location)
     if email:
         contact_parts.append(email)
-    if languages:
-        contact_parts.append(", ".join(languages))
+    language_texts = [
+        text for text in (_format_language(language) for language in languages) if text
+    ]
+    if language_texts:
+        contact_parts.append(", ".join(language_texts))
     if contact_parts:
         lines.append(" | ".join(contact_parts))
     lines.append("")
@@ -385,17 +401,20 @@ def _generate_resume(
     # --- Work arrangement ---
     wa = profile.get("work_arrangement", {})
     if wa:
-        prefs = []
-        if wa.get("open_to_remote"):
-            prefs.append("Remote")
-        if wa.get("open_to_hybrid"):
-            prefs.append("Hybrid")
-        if wa.get("open_to_onsite"):
-            prefs.append("On-site")
-        preferred = wa.get("preferred", "")
-        if prefs:
-            lines.append(f"**Work Arrangement:** {' / '.join(prefs)}" +
-                         (f" (preferred: {preferred})" if preferred else ""))
+        if isinstance(wa, dict):
+            prefs = []
+            if wa.get("open_to_remote"):
+                prefs.append("Remote")
+            if wa.get("open_to_hybrid"):
+                prefs.append("Hybrid")
+            if wa.get("open_to_onsite"):
+                prefs.append("On-site")
+            preferred = wa.get("preferred", "")
+            if prefs:
+                lines.append(f"**Work Arrangement:** {' / '.join(prefs)}" +
+                             (f" (preferred: {preferred})" if preferred else ""))
+        else:
+            lines.append(f"**Work Arrangement:** {wa}")
 
     resume_text = "\n".join(lines)
     return resume_text, warnings
@@ -655,7 +674,10 @@ def _generate_form_answers(job_data: dict, profile: dict, evidence: list[dict]) 
     # Q: Work arrangement preference
     lines.append("**Q: Preferred work arrangement?**")
     wa = profile.get("work_arrangement", {})
-    preferred = wa.get("preferred", "")
+    if isinstance(wa, dict):
+        preferred = wa.get("preferred", "")
+    else:
+        preferred = str(wa)
     if preferred:
         lines.append(f"A: I prefer {preferred} but am open to other arrangements.\n")
     else:

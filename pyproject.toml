@@ -18,6 +18,9 @@ dependencies = [
 dev = [
     "pytest>=7.0",
 ]
+scrapling = [
+    "scrapling>=0.4",
+]
 
 [project.scripts]
 job = "jobos.cli:main"

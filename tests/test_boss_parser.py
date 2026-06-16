@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from jobos.boss_parser import (
     BossJob,
+    classify_boss_page,
+    extract_boss_job_list,
     parse_job_list,
     parse_job_detail,
     parse_chat_page,
+    scrapling_available,
     _text,
     _attr,
 )
@@ -57,6 +62,13 @@ SAMPLE_JOB_DETAIL_HTML = """
 """
 
 
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _fixture(name: str) -> str:
+    return (FIXTURES / name).read_text(encoding="utf-8")
+
+
 class TestParseJobList:
     def test_parses_multiple_jobs(self) -> None:
         jobs = parse_job_list(SAMPLE_JOB_LIST_HTML)
@@ -100,6 +112,70 @@ class TestParseJobList:
         jobs = parse_job_list(SAMPLE_JOB_LIST_HTML)
         with pytest.raises(AttributeError):
             jobs[0].title = "new"  # type: ignore[misc]
+
+
+class TestBossExtraction:
+    def test_fallback_replays_normal_fixture(self) -> None:
+        result = extract_boss_job_list(
+            _fixture("boss_job_list_normal.html"),
+            use_scrapling=False,
+        )
+
+        assert result.classification.state == "normal"
+        assert result.diagnostics.extractor == "beautifulsoup"
+        assert result.jobs[0].title == "Python Developer"
+        assert result.jobs[0].company == "ByteDance"
+        assert result.jobs[0].url.endswith("/job_detail/normal123.html")
+
+    def test_fallback_handles_mutated_dom_variant(self) -> None:
+        result = extract_boss_job_list(
+            _fixture("boss_job_list_mutated.html"),
+            use_scrapling=False,
+        )
+
+        assert result.classification.state == "normal"
+        assert result.jobs[0].title == "AI Platform Engineer"
+        assert result.jobs[0].company == "Example AI"
+        assert "LLM" in result.jobs[0].tags
+
+    @pytest.mark.skipif(not scrapling_available(), reason="Scrapling is optional")
+    def test_scrapling_matches_fallback_on_normal_fixture(self) -> None:
+        html = _fixture("boss_job_list_normal.html")
+        fallback = extract_boss_job_list(html, use_scrapling=False)
+        scrapling = extract_boss_job_list(html, use_scrapling=True)
+
+        assert scrapling.diagnostics.extractor == "scrapling"
+        assert scrapling.diagnostics.selector_attempts
+        assert [job.to_dict() for job in scrapling.jobs] == [
+            job.to_dict() for job in fallback.jobs
+        ]
+
+    @pytest.mark.skipif(not scrapling_available(), reason="Scrapling is optional")
+    def test_scrapling_handles_mutated_fixture(self) -> None:
+        result = extract_boss_job_list(
+            _fixture("boss_job_list_mutated.html"),
+            use_scrapling=True,
+        )
+
+        assert result.classification.state == "normal"
+        assert result.diagnostics.extractor == "scrapling"
+        assert result.jobs[0].job_id == "mutated123.html"
+
+    @pytest.mark.parametrize(
+        ("fixture_name", "state"),
+        [
+            ("boss_login.html", "login_required"),
+            ("boss_verification.html", "verification_required"),
+            ("boss_access_limited.html", "access_limited"),
+            ("boss_empty.html", "empty"),
+            ("boss_page_shape_changed.html", "page_shape_changed"),
+        ],
+    )
+    def test_classifies_recovery_states(self, fixture_name: str, state: str) -> None:
+        classification = classify_boss_page(_fixture(fixture_name))
+
+        assert classification.state == state
+        assert classification.recovery
 
 
 class TestParseJobDetail:

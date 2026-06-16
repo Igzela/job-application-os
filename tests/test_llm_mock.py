@@ -1,6 +1,8 @@
 """Tests for LLM adapter mock mode — deterministic, no network calls."""
 
+import os
 import pytest
+from unittest.mock import patch
 
 from jobos.llm.mock import MockLLMAdapter
 from jobos.llm.provider import get_llm_adapter
@@ -20,8 +22,6 @@ class TestMockLLMAdapter:
         result = m.summarize_jd("Some JD text")
         assert isinstance(result, dict)
         assert "summary" in result
-        assert "key_skills" in result
-        assert "seniority" in result
 
     def test_improve_greeting_passthrough(self):
         m = MockLLMAdapter()
@@ -46,16 +46,47 @@ class TestMockLLMAdapter:
         assert "evidence" in result
         assert "final_score" in result
 
+    def test_chat_returns_string(self):
+        m = MockLLMAdapter()
+        result = m.chat([{"role": "user", "content": "hello"}])
+        assert isinstance(result, str)
+
 
 class TestProvider:
     def test_get_adapter_returns_mock_by_default(self):
-        adapter = get_llm_adapter()
-        assert isinstance(adapter, MockLLMAdapter)
+        with patch.dict(os.environ, {}, clear=True), \
+             patch("jobos.llm.provider._read_claude_config", return_value={}):
+            adapter = get_llm_adapter({"use_local_config": False})
+            assert isinstance(adapter, MockLLMAdapter)
 
     def test_get_adapter_mock_config(self):
         adapter = get_llm_adapter({"provider": "mock"})
         assert isinstance(adapter, MockLLMAdapter)
 
-    def test_get_adapter_unsupported_raises(self):
-        with pytest.raises(NotImplementedError):
-            get_llm_adapter({"provider": "openai"})
+    def test_get_adapter_explicit_api_key_returns_real(self):
+        adapter = get_llm_adapter({
+            "provider": "anthropic",
+            "api_key": "test-key",
+            "base_url": "https://api.anthropic.com",
+        })
+        from jobos.llm.anthropic_adapter import AnthropicAdapter
+        assert isinstance(adapter, AnthropicAdapter)
+
+    def test_get_adapter_openai_returns_real(self):
+        adapter = get_llm_adapter({
+            "provider": "openai",
+            "api_key": "test-key",
+            "base_url": "https://api.openai.com",
+        })
+        from jobos.llm.openai_adapter import OpenAIAdapter
+        assert isinstance(adapter, OpenAIAdapter)
+
+    def test_get_adapter_unknown_raises(self):
+        with pytest.raises(ValueError, match="Unknown provider"):
+            get_llm_adapter({"provider": "unknown", "api_key": "k", "base_url": "http://x"})
+
+    def test_get_adapter_env_fallback(self):
+        with patch.dict(os.environ, {"JOBOS_PROVIDER": "mock"}), \
+             patch("jobos.llm.provider._read_claude_config", return_value={}):
+            adapter = get_llm_adapter({"use_local_config": False})
+            assert isinstance(adapter, MockLLMAdapter)

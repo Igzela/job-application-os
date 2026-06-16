@@ -6,10 +6,14 @@ user logged into BOSS Zhipin.
 """
 
 import json
+import os
 import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
+
+from .boss_parser import classify_boss_page, extract_boss_job_list
 
 ADAPTER_DIR = Path(__file__).resolve().parent / "adapters" / "boss"
 SCRIPT_PATH = ADAPTER_DIR / "read-boss.mjs"
@@ -19,6 +23,10 @@ def import_from_boss(
     keyword: str,
     city_code: str = "100010000",
     port: int = 9222,
+    use_scrapling: bool | None = True,
+    record_diagnostics: bool | None = True,
+    include_html_snapshot: bool = True,
+    html_snapshot_limit: int = 250000,
 ) -> list[dict]:
     """Import jobs from BOSS Zhipin via CDP adapter.
 
@@ -40,12 +48,16 @@ def import_from_boss(
         )
 
     cmd = [node, str(SCRIPT_PATH), keyword, city_code, str(port)]
+    env = os.environ.copy()
+    env["JOBOS_BOSS_INCLUDE_HTML"] = "1" if include_html_snapshot else "0"
+    env["JOBOS_BOSS_HTML_LIMIT"] = str(html_snapshot_limit)
     try:
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             timeout=30,
+            env=env,
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError(
@@ -78,7 +90,30 @@ def import_from_boss(
             f"BOSS adapter returned unexpected structure: {type(data)}"
         )
 
+    if use_scrapling is None:
+        extraction_config = _load_extraction_config()
+        use_scrapling = extraction_config.get("use_scrapling", True)
+    if record_diagnostics is None:
+        extraction_config = _load_extraction_config()
+        record_diagnostics = extraction_config.get("record_diagnostics", True)
+
     diagnostics = data.get("diagnostics", {})
+    html = data.get("html") or ""
+    if html:
+        classification = classify_boss_page(
+            html,
+            url=data.get("url", ""),
+            title=data.get("title", ""),
+        )
+        if classification.state == "verification_required":
+            raise PermissionError(
+                f"BOSS security verification: {classification.reason}"
+            )
+        if classification.state == "login_required":
+            raise PermissionError(f"BOSS login required: {classification.reason}")
+        if classification.state == "access_limited":
+            raise PermissionError(f"BOSS access limited: {classification.reason}")
+
     if diagnostics.get("blocked"):
         raise PermissionError(
             f"BOSS security verification: {diagnostics['blocked']}"
@@ -87,11 +122,42 @@ def import_from_boss(
         raise PermissionError(
             f"BOSS login required: {diagnostics['maybeNeedLogin']}"
         )
+    if diagnostics.get("accessLimited"):
+        raise PermissionError(
+            f"BOSS access limited: {diagnostics['accessLimited']}"
+        )
 
-    items = data.get("items", [])
+    extraction = None
+    if html:
+        extraction = extract_boss_job_list(
+            html,
+            url=data.get("url", ""),
+            title=data.get("title", ""),
+            use_scrapling=use_scrapling,
+        )
+        items = [
+            {
+                "title": job.title,
+                "company": job.company,
+                "salary": job.salary,
+                "tags": job.tags,
+                "link": job.url,
+            }
+            for job in extraction.jobs
+        ]
+    else:
+        items = data.get("items", [])
+
+    if not items and not html:
+        classification = None
+    elif extraction is not None:
+        classification = extraction.classification
+    else:
+        classification = None
+
     jobs = []
     for item in items:
-        jobs.append({
+        job = {
             "title": item.get("title", ""),
             "company": item.get("company", ""),
             "salary": item.get("salary", ""),
@@ -101,6 +167,43 @@ def import_from_boss(
             "keyword": keyword,
             "city_code": city_code,
             "imported_at": datetime.now(timezone.utc).isoformat(),
-        })
+        }
+        if record_diagnostics:
+            job.update(_diagnostic_fields(extraction, diagnostics, classification))
+        jobs.append(job)
 
     return jobs
+
+
+def _load_extraction_config() -> dict[str, Any]:
+    try:
+        from .config import load_config
+
+        return load_config().get("extraction", {})
+    except Exception:
+        return {}
+
+
+def _diagnostic_fields(extraction, node_diagnostics: dict, classification) -> dict[str, Any]:
+    if extraction is None:
+        page_state = node_diagnostics.get("pageState") or "normal"
+        return {
+            "extractor": "node_cdp",
+            "page_state": page_state,
+            "extraction_diagnostics": {
+                "extractor": "node_cdp",
+                "page_state": page_state,
+                "item_count": node_diagnostics.get("cardCount"),
+                "node_diagnostics": node_diagnostics,
+            },
+        }
+
+    data = extraction.diagnostics.to_dict()
+    data["classification"] = extraction.classification.to_dict()
+    if node_diagnostics:
+        data["node_diagnostics"] = node_diagnostics
+    return {
+        "extractor": extraction.diagnostics.extractor,
+        "page_state": extraction.classification.state,
+        "extraction_diagnostics": data,
+    }
