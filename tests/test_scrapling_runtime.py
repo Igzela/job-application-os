@@ -14,7 +14,11 @@ from jobos.scrapling_workflows import fetch_to_workspace
 
 
 def test_capabilities_reports_parser() -> None:
-    assert capabilities().parser
+    detected = capabilities()
+
+    assert isinstance(detected.parser, bool)
+    assert isinstance(detected.fetchers, bool)
+    assert isinstance(detected.spiders, bool)
 
 
 def test_fetch_to_workspace_writes_replay_artifacts(
@@ -61,6 +65,8 @@ def test_dynamic_fetch_reports_missing_browser(monkeypatch) -> None:
 def test_boss_parser_adaptively_recovers_changed_card(
     tmp_path: Path,
 ) -> None:
+    if not capabilities().parser:
+        pytest.skip("Scrapling parser is optional")
     store = tmp_path / "adaptive.db"
     original = """
     <html><body><ul class="search-job-result">
