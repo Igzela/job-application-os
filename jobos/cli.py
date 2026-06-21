@@ -178,6 +178,27 @@ def main():
     p_boss.add_argument("--city", default="100010000", help="City code (default: 100010000 = nationwide)")
     p_boss.add_argument("--port", type=int, default=9222, help="Chrome debug port (default: 9222)")
 
+    p_scrapling_fetch = subparsers.add_parser(
+        "scrapling-fetch",
+        help="Fetch and save a page with Scrapling",
+    )
+    p_scrapling_fetch.add_argument("--url", required=True)
+    p_scrapling_fetch.add_argument(
+        "--engine",
+        choices=["http", "dynamic"],
+        default="http",
+    )
+    p_scrapling_fetch.add_argument("--headed", action="store_true")
+
+    p_scrapling_crawl = subparsers.add_parser(
+        "scrapling-crawl",
+        help="Run a same-domain, robots-aware Scrapling crawl",
+    )
+    p_scrapling_crawl.add_argument("--url", required=True)
+    p_scrapling_crawl.add_argument("--max-pages", type=int, default=50)
+    p_scrapling_crawl.add_argument("--concurrency", type=int, default=3)
+    p_scrapling_crawl.add_argument("--delay", type=float, default=1.0)
+
     # job submit
     p_submit_cmd = subparsers.add_parser("submit", help="Semi-automatic application submission")
     p_submit_cmd.add_argument("--job", required=True, help="Job ID")
@@ -309,6 +330,8 @@ def _dispatch(args):
         "find": _cmd_find,
         "plan": _cmd_plan,
         "boss-import": _cmd_boss_import,
+        "scrapling-fetch": _cmd_scrapling_fetch,
+        "scrapling-crawl": _cmd_scrapling_crawl,
         "submit": _cmd_submit,
         "retro-freeform": _cmd_retro_freeform,
         "auto-submit": _cmd_auto_submit,
@@ -1026,6 +1049,12 @@ def _cmd_boss_import(args):
             record_diagnostics=extraction_config.get("record_diagnostics", True),
             include_html_snapshot=extraction_config.get("include_html_snapshot", True),
             html_snapshot_limit=extraction_config.get("html_snapshot_limit", 250000),
+            adaptive=extraction_config.get("adaptive", True),
+            adaptive_store=extraction_config.get(
+                "adaptive_store",
+                "~/.jobos/scrapling.db",
+            ),
+            adaptive_percentage=extraction_config.get("adaptive_percentage", 40),
         )
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -1049,6 +1078,46 @@ def _cmd_boss_import(args):
         print(f"  - {job['title']} @ {job['company']}  {job['salary']}")
     print(f"\nRaw files saved to: jobs/raw/")
     print(f"State updated: .job-state.json")
+
+
+def _cmd_scrapling_fetch(args):
+    from .scrapling_runtime import ScraplingCapabilityError
+    from .scrapling_workflows import fetch_to_workspace
+
+    try:
+        result = fetch_to_workspace(
+            _get_root(),
+            args.url,
+            engine=args.engine,
+            headless=not args.headed,
+        )
+    except (ScraplingCapabilityError, OSError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    print(f"Fetched: {result.url}")
+    print(f"  Status: {result.status}")
+    print(f"  HTML: {result.html_path}")
+    print(f"  Metadata: {result.metadata_path}")
+
+
+def _cmd_scrapling_crawl(args):
+    from .scrapling_runtime import ScraplingCapabilityError
+    from .scrapling_workflows import crawl_to_workspace
+
+    try:
+        result = crawl_to_workspace(
+            _get_root(),
+            args.url,
+            max_pages=args.max_pages,
+            concurrency=args.concurrency,
+            download_delay=args.delay,
+        )
+    except (ScraplingCapabilityError, OSError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    print(f"Crawl completed: {result['completed']}")
+    print(f"  Items: {result['items']}")
+    print(f"  Output: {result['items_path']}")
 
 
 def _build_llm_config(args) -> dict:

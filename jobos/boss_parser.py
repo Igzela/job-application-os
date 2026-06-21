@@ -21,6 +21,7 @@ from .extraction import (
     PageExtractionResult,
     SelectorAttempt,
 )
+from .scrapling_runtime import create_selector
 
 try:
     from scrapling.parser import Selector
@@ -127,6 +128,9 @@ def extract_boss_job_list(
     url: str = "",
     title: str = "",
     use_scrapling: bool | None = None,
+    adaptive: bool = True,
+    adaptive_store: str = "~/.jobos/scrapling.db",
+    adaptive_percentage: int = 40,
 ) -> PageExtractionResult:
     """Extract BOSS job cards and classify the page state.
 
@@ -140,13 +144,30 @@ def extract_boss_job_list(
 
     if allow_scrapling and Selector is not None:
         try:
-            jobs = _parse_with_scrapling(html, attempts)
+            jobs, adaptive_recovered = _parse_with_scrapling(
+                html,
+                attempts,
+                url=url or BOSS_ORIGIN,
+                adaptive=adaptive,
+                adaptive_store=adaptive_store,
+                adaptive_percentage=adaptive_percentage,
+            )
         except Exception as exc:
             warnings.append(f"scrapling_failed: {exc}")
             jobs = []
+            adaptive_recovered = False
         if jobs:
             classification = _normal_classification(classification, len(jobs))
-            return _result(jobs, classification, "scrapling", attempts, warnings, False)
+            return _result(
+                jobs,
+                classification,
+                "scrapling",
+                attempts,
+                warnings,
+                False,
+                adaptive_enabled=adaptive,
+                adaptive_recovered=adaptive_recovered,
+            )
         if classification.state in ("login_required", "verification_required", "access_limited", "empty"):
             return _result([], classification, "scrapling", attempts, warnings, False)
         warnings.append("scrapling_found_no_jobs")
@@ -278,9 +299,46 @@ def parse_chat_page(html: str) -> dict:
     return {"greeting_input": _attr(greeting_el, "placeholder") or ""}
 
 
-def _parse_with_scrapling(html: str, attempts: list[SelectorAttempt]) -> list[ExtractedJobCard]:
-    page = Selector(html)
+def _parse_with_scrapling(
+    html: str,
+    attempts: list[SelectorAttempt],
+    *,
+    url: str,
+    adaptive: bool,
+    adaptive_store: str,
+    adaptive_percentage: int,
+) -> tuple[list[ExtractedJobCard], bool]:
+    page = create_selector(
+        html,
+        url=url,
+        adaptive=adaptive,
+        storage_file=adaptive_store,
+    )
     cards = _first_non_empty_scrapling(page, CARD_SELECTORS, attempts, "job_cards")
+    recovered = False
+    if not cards and adaptive:
+        cards = page.css(
+            CARD_SELECTORS[0],
+            identifier="boss.job_cards",
+            adaptive=True,
+            percentage=adaptive_percentage,
+        )
+        attempts.append(
+            SelectorAttempt(
+                "scrapling",
+                CARD_SELECTORS[0],
+                len(cards),
+                "job_cards",
+                adaptive=True,
+            )
+        )
+        recovered = bool(cards)
+    elif cards and adaptive:
+        page.css(
+            CARD_SELECTORS[0],
+            identifier="boss.job_cards",
+            auto_save=True,
+        )
     jobs: list[ExtractedJobCard] = []
     seen: set[str] = set()
     for card in cards:
@@ -305,7 +363,7 @@ def _parse_with_scrapling(html: str, attempts: list[SelectorAttempt]) -> list[Ex
             continue
         seen.add(key)
         jobs.append(job)
-    return jobs
+    return jobs, recovered
 
 
 def _parse_with_bs4(html: str, attempts: list[SelectorAttempt] | None = None) -> list[ExtractedJobCard]:
@@ -355,6 +413,9 @@ def _result(
     attempts: list[SelectorAttempt],
     warnings: list[str],
     fallback_used: bool,
+    *,
+    adaptive_enabled: bool = False,
+    adaptive_recovered: bool = False,
 ) -> PageExtractionResult:
     return PageExtractionResult(
         jobs=jobs,
@@ -367,6 +428,8 @@ def _result(
             selector_attempts=attempts,
             item_count=len(jobs),
             warnings=warnings,
+            adaptive_enabled=adaptive_enabled,
+            adaptive_recovered=adaptive_recovered,
         ),
     )
 

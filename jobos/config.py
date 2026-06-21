@@ -57,6 +57,9 @@ DEFAULT_CONFIG = {
 
     "extraction": {
         "use_scrapling": True,
+        "adaptive": True,
+        "adaptive_store": "~/.jobos/scrapling.db",
+        "adaptive_percentage": 40,
         "record_diagnostics": True,
         "include_html_snapshot": True,
         "html_snapshot_limit": 250000,

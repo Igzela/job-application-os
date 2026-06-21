@@ -103,6 +103,9 @@ BOSS imports use a Python extraction layer with Scrapling when available and a B
 ```yaml
 extraction:
   use_scrapling: true
+  adaptive: true
+  adaptive_store: ~/.jobos/scrapling.db
+  adaptive_percentage: 40
   record_diagnostics: true
   include_html_snapshot: true
   html_snapshot_limit: 250000
@@ -111,6 +114,30 @@ extraction:
 `job boss-import --keyword <kw>` records `extractor`, `page_state`, and `extraction_diagnostics` on imported jobs. Loop events copy those fields into `events.jsonl`; `summary.json` aggregates `by_extractor` and `by_page_state`. Submit attempts also classify the current page and persist recovery hints under `applications/<job_id>/submit_attempts/`.
 
 Stable page states are `normal`, `login_required`, `verification_required`, `access_limited`, `empty`, and `page_shape_changed`. When Scrapling cannot extract cards, the fallback parser still runs and records `fallback_used`.
+
+Install the complete Scrapling integration in an isolated environment:
+
+```bash
+pip install -e ".[scrapling]"
+scrapling install
+```
+
+Fetch a replayable page artifact with the HTTP or standard browser engine:
+
+```bash
+job scrapling-fetch --url https://example.com --engine http
+job scrapling-fetch --url https://example.com --engine dynamic
+```
+
+Run a same-domain crawl with robots.txt enforcement, concurrency limits,
+download delay, JSONL output, and a resumable checkpoint directory:
+
+```bash
+job scrapling-crawl --url https://example.com --max-pages 50 --concurrency 3 --delay 1
+```
+
+Outputs are written under ignored `scrapling_runs/`. Login, verification, and
+access-limited BOSS pages remain hard stops.
 
 ### Live BOSS Pipeline Hardening
 

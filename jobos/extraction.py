@@ -37,6 +37,7 @@ class SelectorAttempt:
     selector: str
     count: int
     purpose: str
+    adaptive: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -69,6 +70,8 @@ class ExtractionDiagnostics:
     selector_attempts: list[SelectorAttempt] = field(default_factory=list)
     item_count: int = 0
     warnings: list[str] = field(default_factory=list)
+    adaptive_enabled: bool = False
+    adaptive_recovered: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)

@@ -40,6 +40,9 @@ def import_from_boss(
     record_diagnostics: bool | None = True,
     include_html_snapshot: bool = True,
     html_snapshot_limit: int = 250000,
+    adaptive: bool = True,
+    adaptive_store: str = "~/.jobos/scrapling.db",
+    adaptive_percentage: int = 40,
 ) -> list[dict]:
     """Import jobs from BOSS Zhipin via CDP adapter.
 
@@ -147,6 +150,9 @@ def import_from_boss(
             url=data.get("url", ""),
             title=data.get("title", ""),
             use_scrapling=use_scrapling,
+            adaptive=adaptive,
+            adaptive_store=adaptive_store,
+            adaptive_percentage=adaptive_percentage,
         )
         items = [
             {
@@ -198,6 +204,9 @@ def import_boss_jobs_to_workspace(
     record_diagnostics: bool | None = True,
     include_html_snapshot: bool = True,
     html_snapshot_limit: int = 250000,
+    adaptive: bool = True,
+    adaptive_store: str = "~/.jobos/scrapling.db",
+    adaptive_percentage: int = 40,
 ) -> BossWorkspaceImportResult:
     """Import BOSS jobs and persist raw JSON plus state entries."""
     jobs = import_from_boss(
@@ -208,6 +217,9 @@ def import_boss_jobs_to_workspace(
         record_diagnostics=record_diagnostics,
         include_html_snapshot=include_html_snapshot,
         html_snapshot_limit=html_snapshot_limit,
+        adaptive=adaptive,
+        adaptive_store=adaptive_store,
+        adaptive_percentage=adaptive_percentage,
     )
     if not jobs:
         return BossWorkspaceImportResult(jobs=[], job_ids=[])

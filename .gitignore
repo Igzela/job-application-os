@@ -25,5 +25,6 @@ jobs/
 predictions/
 pipeline_runs/
 browser_checks/
+scrapling_runs/
 *.json.lock
 .claude/
