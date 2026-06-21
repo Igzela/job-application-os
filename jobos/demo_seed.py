@@ -68,7 +68,7 @@ def seed_demo_workspace(state_dir: str | Path) -> DemoSeedResult:
     )
     (profile_dir / "education.yaml").write_text(
         "education:\n"
-        "  - institution: UC Berkeley\n"
+        "  - institution: University of California, Berkeley\n"
         "    degree: B.S.\n"
         "    major: Computer Science\n"
         '    graduation_date: "2027-05"\n'

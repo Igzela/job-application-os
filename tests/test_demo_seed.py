@@ -7,6 +7,7 @@ import pytest
 
 from jobos.cli import _cmd_demo_seed
 from jobos.demo_seed import seed_demo_workspace
+from jobos.doctor import run_doctor
 
 
 class _Args:
@@ -70,3 +71,8 @@ class TestDemoSeed:
         _cmd_demo_seed(_Args())
         for d in ("profile", "jobs", "predictions", "applications", "retros", "rubrics"):
             assert (empty_dir / d).is_dir()
+
+    def test_seeded_workspace_passes_doctor(self, empty_dir: Path):
+        seed_demo_workspace(empty_dir)
+
+        assert run_doctor(empty_dir).all_ok
