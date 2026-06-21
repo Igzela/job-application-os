@@ -185,19 +185,39 @@ def main():
     p_scrapling_fetch.add_argument("--url", required=True)
     p_scrapling_fetch.add_argument(
         "--engine",
-        choices=["http", "dynamic"],
-        default="http",
+        choices=["http", "dynamic", "stealth"],
+        default=None,
     )
     p_scrapling_fetch.add_argument("--headed", action="store_true")
+    p_scrapling_fetch.add_argument(
+        "--proxy-env",
+        help="Environment variable containing proxy URL",
+    )
+    p_scrapling_fetch.add_argument(
+        "--timeout",
+        type=int,
+        default=None,
+        help="Timeout in seconds",
+    )
 
     p_scrapling_crawl = subparsers.add_parser(
         "scrapling-crawl",
         help="Run a same-domain, robots-aware Scrapling crawl",
     )
     p_scrapling_crawl.add_argument("--url", required=True)
-    p_scrapling_crawl.add_argument("--max-pages", type=int, default=50)
-    p_scrapling_crawl.add_argument("--concurrency", type=int, default=3)
-    p_scrapling_crawl.add_argument("--delay", type=float, default=1.0)
+    p_scrapling_crawl.add_argument("--max-pages", type=int, default=None)
+    p_scrapling_crawl.add_argument("--concurrency", type=int, default=None)
+    p_scrapling_crawl.add_argument("--delay", type=float, default=None)
+    p_scrapling_crawl.add_argument(
+        "--stealth",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use Scrapling stealth browser session",
+    )
+    p_scrapling_crawl.add_argument(
+        "--proxy-env",
+        help="Environment variable containing proxy URL",
+    )
 
     # job submit
     p_submit_cmd = subparsers.add_parser("submit", help="Semi-automatic application submission")
@@ -1081,36 +1101,70 @@ def _cmd_boss_import(args):
 
 
 def _cmd_scrapling_fetch(args):
+    from .config import load_config, resolve_proxy_url
     from .scrapling_runtime import ScraplingCapabilityError
     from .scrapling_workflows import fetch_to_workspace
 
+    config = load_config()
+    extraction_config = config.get("extraction", {})
+    stealth_config = config.get("stealth", {})
+    engine = args.engine or extraction_config.get("engine", "http")
+    timeout = args.timeout
+    if timeout is None:
+        timeout = stealth_config.get("timeout", 60) if engine == "stealth" else 30
     try:
         result = fetch_to_workspace(
             _get_root(),
             args.url,
-            engine=args.engine,
+            engine=engine,
             headless=not args.headed,
+            timeout=timeout,
+            proxy=resolve_proxy_url(
+                config,
+                env_name=args.proxy_env,
+            ),
+            fetch_options=stealth_config if engine == "stealth" else None,
         )
     except (ScraplingCapabilityError, OSError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
     print(f"Fetched: {result.url}")
     print(f"  Status: {result.status}")
+    print(f"  Engine: {result.engine}")
     print(f"  HTML: {result.html_path}")
     print(f"  Metadata: {result.metadata_path}")
 
 
 def _cmd_scrapling_crawl(args):
+    from .config import load_config, resolve_proxy_url
     from .scrapling_runtime import ScraplingCapabilityError
     from .scrapling_workflows import crawl_to_workspace
 
+    config = load_config()
+    spider_config = config.get("spider", {})
+    stealth_config = config.get("stealth", {})
     try:
         result = crawl_to_workspace(
             _get_root(),
             args.url,
-            max_pages=args.max_pages,
-            concurrency=args.concurrency,
-            download_delay=args.delay,
+            max_pages=args.max_pages
+            if args.max_pages is not None
+            else spider_config.get("max_pages", 50),
+            concurrency=args.concurrency
+            if args.concurrency is not None
+            else spider_config.get("concurrency", 3),
+            download_delay=args.delay
+            if args.delay is not None
+            else spider_config.get("download_delay", 1.0),
+            stealth=args.stealth
+            if args.stealth is not None
+            else spider_config.get("stealth", False),
+            proxy=resolve_proxy_url(
+                config,
+                env_name=args.proxy_env,
+            ),
+            robots_txt_obey=spider_config.get("robots_txt_obey", True),
+            stealth_options=stealth_config,
         )
     except (ScraplingCapabilityError, OSError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)

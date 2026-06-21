@@ -132,14 +132,15 @@ Profile (skills, tier)
 1. **Dry-run is the default.** `job dry-run`, `job loop-run --dry-run`, and unconfirmed submit commands do not send applications.
 2. **Live BOSS mode is explicit.** `job start` and confirmed submit flows use a logged-in browser session only when the user requests live behavior. They are not part of the default offline workflow.
 3. **Human-controlled browser session.** Live BOSS automation connects to an already-running browser session through CDP, or an explicitly isolated standalone browser when requested. It does not use hidden account credentials.
-4. **No forbidden evasion.** The project does not implement proxy rotation, CAPTCHA bypass, credential stuffing, or security-verification circumvention.
-5. **No fingerprint masking.** Standard Playwright is used without spoofed user agents, viewport, geolocation, simulated typing, or automation-flag masking.
-6. **Duplicate and daily-limit guards.** Live BOSS flows persist contacted job state and daily limits to reduce repeat sends and uncontrolled volume.
-7. **Diagnosed submit attempts.** Submit helpers capture screenshots, page state, extractor, recovery hints, and success signals so live behavior can be audited after the run.
-8. **Validated Pack gate.** Workspace live submission requires clean persisted evidence validation and a hash-verified Pack manifest.
-9. **Immutable predictions.** `predictor.save_prediction()` raises `FileExistsError` if a prediction file already exists. Only `--new-version` creates additional files.
-10. **Rubric bump requires explicit approval.** `rubric_manager.bump_rubric()` creates a candidate but never activates it. The caller must explicitly call `set_active_rubric()`.
-11. **Scam detection before pipeline entry.** `scam_checker.check_opportunity()` evaluates opportunities against red flag patterns. Only "feasible" or "suspect" verdicts enter the pipeline; "scam" verdicts are blocked.
+4. **Scrapling owns extraction sessions.** HTTP, dynamic, stealth, adaptive parsing, and Spider crawling share one runtime and diagnostics contract.
+5. **Human verification boundary.** Fingerprint protection is allowed for extraction, but automatic CAPTCHA/Turnstile solving is disabled. Login and security verification require human action.
+6. **Split browser responsibilities.** Scrapling uses configured Chromium for extraction. User-controlled CDP remains available for login, manual verification, and final submission. See `docs/BROWSER_SETUP.md`.
+7. **Duplicate and daily-limit guards.** Live BOSS flows persist contacted job state and daily limits to reduce repeat sends and uncontrolled volume.
+8. **Diagnosed submit attempts.** Submit helpers capture screenshots, page state, extractor, recovery hints, and success signals so live behavior can be audited after the run.
+9. **Validated Pack gate.** Workspace live submission requires clean persisted evidence validation and a hash-verified Pack manifest.
+10. **Immutable predictions.** `predictor.save_prediction()` raises `FileExistsError` if a prediction file already exists. Only `--new-version` creates additional files.
+11. **Rubric bump requires explicit approval.** `rubric_manager.bump_rubric()` creates a candidate but never activates it. The caller must explicitly call `set_active_rubric()`.
+12. **Scam detection before pipeline entry.** `scam_checker.check_opportunity()` evaluates opportunities against red flag patterns. Only "feasible" or "suspect" verdicts enter the pipeline; "scam" verdicts are blocked.
 
 ### What This System Does NOT Do
 

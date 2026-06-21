@@ -34,7 +34,6 @@ def main() -> int:
     }
 
     forbidden = {
-        "patchright": "browser fingerprint masking",
         "AutomationControlled": "browser automation flag masking",
         "pipeline_results.json": "legacy non-ledger live output",
     }
@@ -57,6 +56,46 @@ def main() -> int:
                         f"{path.relative_to(ROOT)}:{node.lineno}: "
                         "job status must change through jobos.pipeline"
                     )
+
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Assign)
+                and isinstance(node.value, ast.Constant)
+                and node.value.value is True
+            ):
+                for target in node.targets:
+                    if (
+                        isinstance(target, ast.Subscript)
+                        and isinstance(target.slice, ast.Constant)
+                        and target.slice.value == "solve_cloudflare"
+                    ):
+                        errors.append(
+                            f"{path.relative_to(ROOT)}:{node.lineno}: "
+                            "automatic challenge solving must remain disabled"
+                        )
+            if isinstance(node, ast.Dict):
+                for key, value in zip(node.keys, node.values):
+                    if (
+                        isinstance(key, ast.Constant)
+                        and key.value == "solve_cloudflare"
+                        and isinstance(value, ast.Constant)
+                        and value.value is True
+                    ):
+                        errors.append(
+                            f"{path.relative_to(ROOT)}:{node.lineno}: "
+                            "automatic challenge solving must remain disabled"
+                        )
+            if isinstance(node, ast.Call):
+                for keyword in node.keywords:
+                    if (
+                        keyword.arg == "solve_cloudflare"
+                        and isinstance(keyword.value, ast.Constant)
+                        and keyword.value.value is True
+                    ):
+                        errors.append(
+                            f"{path.relative_to(ROOT)}:{node.lineno}: "
+                            "automatic challenge solving must remain disabled"
+                        )
 
     required_ignores = {
         ".job-state.json",

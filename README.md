@@ -96,9 +96,26 @@ events but no summary are shown as `running`.
 
 See [docs/automation-loop-handoff.md](docs/automation-loop-handoff.md) for implementation notes and run artifact conventions.
 
-### Scrapling Extraction Diagnostics
+### Scrapling Extraction & Stealth
 
-BOSS imports use a Python extraction layer with Scrapling when available and a BeautifulSoup fallback when it is disabled or unavailable. Configure it in `~/.jobos/config.yaml`:
+BOSS imports use a Python extraction layer with Scrapling when available and a BeautifulSoup fallback when it is disabled or unavailable. Scrapling provides three fetcher tiers:
+
+| Engine | Speed | Stealth | Use Case |
+|--------|-------|---------|----------|
+| `http` | ⚡⚡⚡ | ⭐⭐ | Basic scraping, static pages |
+| `dynamic` | ⚡⚡ | ⭐⭐⭐ | JS-rendered pages, light protection |
+| `stealth` | ⚡⚡ | ⭐⭐⭐⭐⭐ | Fingerprint protection, difficult dynamic pages |
+
+The stealth engine provides:
+- **CDP runtime leak bypass** — hides Playwright protocol traces
+- **WebRTC leak prevention** — `block_webrtc` prevents local IP exposure
+- **Canvas fingerprint noise** — `hide_canvas` prevents canvas tracking
+- **JS execution isolation** — removes Playwright fingerprints
+- **Headless detection patches** — auto-patches known detection methods
+- **Google referer** — default referer from google.com
+- **Ad/tracker blocking** — blocks ~3,500 known ad domains
+
+Configure in `~/.jobos/config.yaml`:
 
 ```yaml
 extraction:
@@ -107,26 +124,50 @@ extraction:
   adaptive_store: ~/.jobos/scrapling.db
   adaptive_percentage: 40
   record_diagnostics: true
-  include_html_snapshot: true
-  html_snapshot_limit: 250000
+
+stealth:
+  solve_cloudflare: false
+  block_webrtc: true
+  hide_canvas: true
+  google_search: true
+  block_ads: true
+  real_chrome: true
+  timeout: 60
+
+proxy:
+  url_env: JOBOS_PROXY_URL
+
+spider:
+  max_pages: 50
+  concurrency: 3
+  download_delay: 1.0
+  robots_txt_obey: true
+  stealth: false
 ```
 
 `job boss-import --keyword <kw>` records `extractor`, `page_state`, and `extraction_diagnostics` on imported jobs. Loop events copy those fields into `events.jsonl`; `summary.json` aggregates `by_extractor` and `by_page_state`. Submit attempts also classify the current page and persist recovery hints under `applications/<job_id>/submit_attempts/`.
 
 Stable page states are `normal`, `login_required`, `verification_required`, `access_limited`, `empty`, and `page_shape_changed`. When Scrapling cannot extract cards, the fallback parser still runs and records `fallback_used`.
 
-Install the complete Scrapling integration in an isolated environment:
+Install the complete Scrapling integration:
 
 ```bash
 pip install -e ".[scrapling]"
 scrapling install
 ```
 
-Fetch a replayable page artifact with the HTTP or standard browser engine:
+**Browser setup:** Scrapling extraction uses configured Chromium; login and
+submission may use user-controlled CDP. See
+[docs/BROWSER_SETUP.md](docs/BROWSER_SETUP.md).
+
+Fetch a replayable page artifact with any engine:
 
 ```bash
 job scrapling-fetch --url https://example.com --engine http
 job scrapling-fetch --url https://example.com --engine dynamic
+job scrapling-fetch --url https://example.com --engine stealth
+JOBOS_PROXY_URL=http://user:pass@host:port \
+  job scrapling-fetch --url https://example.com --engine stealth
 ```
 
 Run a same-domain crawl with robots.txt enforcement, concurrency limits,
@@ -134,10 +175,13 @@ download delay, JSONL output, and a resumable checkpoint directory:
 
 ```bash
 job scrapling-crawl --url https://example.com --max-pages 50 --concurrency 3 --delay 1
+JOBOS_PROXY_URL=http://user:pass@host:port \
+  job scrapling-crawl --url https://example.com --stealth
 ```
 
-Outputs are written under ignored `scrapling_runs/`. Login, verification, and
-access-limited BOSS pages remain hard stops.
+Outputs are written under ignored `scrapling_runs/`. Proxy URLs are not written
+to summaries. Login, CAPTCHA, verification, and access-limited BOSS pages
+remain human-handled stops.
 
 ### Live BOSS Pipeline Hardening
 
@@ -243,8 +287,8 @@ This system defaults to dry-run/manual workflows, with explicit live BOSS mode:
 
 - **Dry-run remains non-submitting.** `dry_run.py` fills local HTML forms only. `job loop-run --dry-run` skips browser submission stages.
 - **Loop dry-run skips browser stages.** `job loop-run --dry-run` runs only `score`, `predict`, `pack`, and `validate`.
-- **No anti-detection.** No proxy rotation, CAPTCHA bypass, or scraping evasion.
-- **No fingerprint masking.** Standard Playwright does not spoof user agents, viewport, geolocation, or automation flags.
+- **Scrapling extraction runtime.** HTTP, dynamic, stealth, adaptive parsing, and Spider crawling share one runtime.
+- **Human verification boundary.** Fingerprint protection is allowed for extraction; automatic CAPTCHA/Turnstile solving remains disabled.
 - **Evidence-only resume.** `validate-pack` flags any resume claim not traceable to the evidence bank.
 - **Immutable predictions.** Predictions cannot be overwritten — only versioned.
 - **Live BOSS mode is explicit.** `job start` uses a logged-in browser session and writes a unique Run Ledger under `pipeline_runs/`; run it only after reviewing config and daily limits.

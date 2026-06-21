@@ -57,12 +57,35 @@ DEFAULT_CONFIG = {
 
     "extraction": {
         "use_scrapling": True,
+        "engine": "http",
         "adaptive": True,
         "adaptive_store": "~/.jobos/scrapling.db",
         "adaptive_percentage": 40,
         "record_diagnostics": True,
         "include_html_snapshot": True,
         "html_snapshot_limit": 250000,
+    },
+
+    "stealth": {
+        "solve_cloudflare": False,
+        "block_webrtc": True,
+        "hide_canvas": True,
+        "google_search": True,
+        "block_ads": True,
+        "real_chrome": True,
+        "timeout": 60,
+    },
+
+    "proxy": {
+        "url_env": "JOBOS_PROXY_URL",
+    },
+
+    "spider": {
+        "max_pages": 50,
+        "concurrency": 3,
+        "download_delay": 1.0,
+        "robots_txt_obey": True,
+        "stealth": False,
     },
 
     "scoring": {
@@ -144,6 +167,22 @@ def load_config(environ: dict[str, str] | None = None) -> dict:
         return obj
 
     return expand(merged)
+
+
+def resolve_proxy_url(
+    config: dict | None = None,
+    *,
+    env_name: str | None = None,
+    environ: dict[str, str] | None = None,
+) -> str | None:
+    """Resolve proxy URL from the configured environment variable."""
+    config = config or load_config(environ=environ)
+    name = env_name or config.get("proxy", {}).get("url_env", "JOBOS_PROXY_URL")
+    values = {
+        **load_env_values(),
+        **(dict(os.environ) if environ is None else environ),
+    }
+    return values.get(name) or None
 
 
 def save_config(config: dict):
