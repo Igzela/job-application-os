@@ -76,6 +76,12 @@ class TestRecordSubmission:
         raw = json.loads((state_dir / ".job-state.json").read_text())
         assert raw["jobs"]["alpha-001"]["submission_channel"] == "referral"
 
+    def test_marks_job_status_submitted(self, state_dir: Path) -> None:
+        record_submission("alpha-001", "referral", state_dir)
+
+        raw = json.loads((state_dir / ".job-state.json").read_text())
+        assert raw["jobs"]["alpha-001"]["status"] == "submitted"
+
     def test_raises_on_unknown_job(self, state_dir: Path) -> None:
         with pytest.raises(KeyError, match="not found"):
             record_submission("nonexistent", "email", state_dir)

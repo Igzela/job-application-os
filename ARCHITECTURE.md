@@ -59,18 +59,23 @@ Each CLI command maps to one or more Python modules:
 | `job retro` | `retro.record_retro` | Writes `retros/*.json`, updates state |
 | `job status` | `status.update_status` | Writes `STATUS.md` |
 | `job bump-rubric` | `rubric_manager.bump_rubric` | Writes candidate rubric, comparison report |
-| `job doctor` | `cli._cmd_doctor` | Read-only health check |
+| `job doctor` | `doctor.run_doctor` | Read-only workspace, Pack, Run Ledger, and runtime-state integrity check |
+| `job browser-check` | `browser_check.check_boss_browser` | Read-only BOSS connectivity/page-state check with screenshot, HTML, and JSON diagnostics |
 | `job demo-seed` | `cli._cmd_demo_seed` | Creates sample workspace with fixtures |
 | `job paste` | `importer.import_job` | Reads stdin, writes normalized YAML |
 | `job queue` | `queue.get_queue` | Read-only pipeline stage view |
+| `job runs` | `run_ledger.list_run_ledgers` | Read-only Run Ledger history |
 | `job recommend` | `recommend.recommend_jobs` | Read-only ranked job list |
-| `job validate-pack` | `evidence_markers.generate_evidence_report` | Read-only evidence audit |
+| `job validate-pack` | `evidence_markers.generate_workspace_evidence_report` | Persists validation and marks clean packs validated |
 | `job report` | `report.generate_report` | Writes `reports/report.md` |
 | `job scam-check` | `scam_checker.check_opportunity` | Appends to state `opportunities[]` |
 | `job find` | `opportunity_finder.find_opportunities` | Appends to state `opportunities[]` |
 | `job plan` | `action_planner.create_plan` | Writes `active_opportunity` in state |
 | `job boss-import` | `boss_import.import_from_boss` | Writes `jobs/raw/*.json`, updates state |
 | `job submit` | `submitter.submit_application` | No state mutation (dry-run default) |
+| `job auto-submit` | `submitter.auto_submit_single`, `submitter.auto_submit_batch` | Writes submit attempt artifacts; updates state only after confirmed live success |
+| `job start` | `orchestrator.run_full_pipeline` | Writes a live Run Ledger, submit attempts, contact/daily-limit state |
+| `job auto-reply` | `auto_reply.run_auto_reply_loop` | Writes auto-reply state; dry-run unless live mode is explicit |
 | `job retro-freeform` | `retro.record_freeform_retro` | Writes `retros/*.json`, appends `lessons.md` |
 
 ## Opportunity Pipeline
@@ -124,28 +129,41 @@ Profile (skills, tier)
 
 ### Hard Constraints (enforced by code)
 
-1. **No live submission.** The `dry_run` module only fills local HTML forms. No HTTP client is imported or called.
-2. **No anti-detection.** No proxy rotation, CAPTCHA bypass, undetected-chromedriver, or scraping evasion code exists anywhere in this project.
-3. **Evidence-only resume.** `pack_generator.validate_pack()` checks every claim in generated resumes against the evidence bank. Unsupported claims are flagged as warnings.
-4. **Immutable predictions.** `predictor.save_prediction()` raises `FileExistsError` if a prediction file already exists. Only `--new-version` creates additional files.
-5. **Rubric bump requires explicit approval.** `rubric_manager.bump_rubric()` creates a candidate but never activates it. The caller must explicitly call `set_active_rubric()`.
-6. **Scam detection before pipeline entry.** `scam_checker.check_opportunity()` evaluates opportunities against red flag patterns. Only "feasible" or "suspect" verdicts enter the pipeline; "scam" verdicts are blocked.
+1. **Dry-run is the default.** `job dry-run`, `job loop-run --dry-run`, and unconfirmed submit commands do not send applications.
+2. **Live BOSS mode is explicit.** `job start` and confirmed submit flows use a logged-in browser session only when the user requests live behavior. They are not part of the default offline workflow.
+3. **Human-controlled browser session.** Live BOSS automation connects to an already-running browser session through CDP, or an explicitly isolated standalone browser when requested. It does not use hidden account credentials.
+4. **No forbidden evasion.** The project does not implement proxy rotation, CAPTCHA bypass, credential stuffing, or security-verification circumvention.
+5. **No fingerprint masking.** Standard Playwright is used without spoofed user agents, viewport, geolocation, simulated typing, or automation-flag masking.
+6. **Duplicate and daily-limit guards.** Live BOSS flows persist contacted job state and daily limits to reduce repeat sends and uncontrolled volume.
+7. **Diagnosed submit attempts.** Submit helpers capture screenshots, page state, extractor, recovery hints, and success signals so live behavior can be audited after the run.
+8. **Validated Pack gate.** Workspace live submission requires clean persisted evidence validation and a hash-verified Pack manifest.
+9. **Immutable predictions.** `predictor.save_prediction()` raises `FileExistsError` if a prediction file already exists. Only `--new-version` creates additional files.
+10. **Rubric bump requires explicit approval.** `rubric_manager.bump_rubric()` creates a candidate but never activates it. The caller must explicitly call `set_active_rubric()`.
+11. **Scam detection before pipeline entry.** `scam_checker.check_opportunity()` evaluates opportunities against red flag patterns. Only "feasible" or "suspect" verdicts enter the pipeline; "scam" verdicts are blocked.
 
 ### What This System Does NOT Do
 
-- Does not connect to LinkedIn, Indeed, BOSS Zhipin, or any live job platform
-- Does not automate browser actions against real websites
-- Does not generate fabricated resume content
-- Does not submit applications on the user's behalf
-- Does not require API keys for core functionality
+- Does not default to live submission.
+- Supports no live platform adapters for LinkedIn, Indeed, or other unimplemented platforms.
+- Does not bypass BOSS login, verification, CAPTCHA, or access-limit states.
+- Does not generate fabricated resume content.
+- Does not send applications without an explicit live command and confirmation path.
+- Does not require API keys for core offline functionality.
 
-### Assist-Only Mode (Future)
+### Explicit Live BOSS Mode
 
-When a `boss_assist` or similar adapter is added, it will:
-- Parse user-provided page content / JD text
-- Fill draft forms locally
-- **Require human confirmation** before any submission
-- Never bypass platform terms of service
+Live BOSS mode exists for a logged-in browser session and is intentionally narrow:
+
+- `job boss-import` imports BOSS search results through the CDP adapter and records extractor/page-state diagnostics.
+- `job start` runs a live BOSS pipeline only when invoked explicitly. `--max-jobs` means maximum successful submissions, not maximum analyzed candidates.
+- Before scoring and greeting generation, each BOSS candidate detail page is opened and classified.
+- Unsafe greetings are rewritten once or skipped.
+- Duplicate/contact state is persisted in `.job-contact-state.json`.
+- Submit success requires strong signals such as an already-contacted state, visible sent state, greeting echo, or expected company chat context.
+- Screenshots and page diagnostics are persisted under `applications/<job_id>/`.
+- Live run plans, events, and summaries are persisted under `pipeline_runs/<run_id>/`.
+
+This mode is documented by ADR-001 and should remain explicit, diagnosed, and conservative.
 
 ## LLM Adapter (Milestone 3)
 
@@ -171,7 +189,7 @@ class LLMAdapter(Protocol):
 
 **Default behavior:** `get_llm_adapter()` returns `MockLLMAdapter` which passes text through unchanged. No API keys. No network calls. All tests use mock mode.
 
-**Future provider:** A real provider (e.g., OpenAI) would be added as `jobos/llm/openai.py` and selected via `get_llm_adapter({"provider": "openai", "api_key": "..."})`. It would still respect the "no live submission" boundary.
+**Real providers:** Anthropic and OpenAI adapters can be selected through explicit config, process environment, `~/.jobos/.env`, or `~/.jobos/config.yaml`, in that order. Claude Code configuration is opt-in. LLM provider choice does not relax dry-run defaults, evidence grounding, or live BOSS confirmation requirements.
 
 ## File Structure
 
@@ -183,6 +201,10 @@ job-application-os/
 │   ├── scorer.py            # 6-dimension scoring engine with hard gates
 │   ├── predictor.py         # Immutable prediction creation
 │   ├── pack_generator.py    # Application pack generation + evidence validation
+│   ├── application_pack.py  # Pack manifest, hashes, loading, integrity checks
+│   ├── runtime_state.py     # Versioned, locked, atomic JSON persistence
+│   ├── run_ledger.py        # Shared dry/live plan, event, summary artifacts
+│   ├── automation_policy.py # Operating hours and daily live-action limits
 │   ├── dry_run.py           # Local mock form filling
 │   ├── importer.py          # JD text → normalized YAML
 │   ├── profile_loader.py    # Profile + evidence bank loading

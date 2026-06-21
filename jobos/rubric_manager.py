@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .workspace import STATE_FILENAME, load_state_file, save_state_file
+
 
 # ---------------------------------------------------------------------------
 # State file helpers
@@ -29,17 +31,11 @@ _DEFAULT_STATE: dict[str, Any] = {
 
 
 def _load_state(state_path: Path) -> dict[str, Any]:
-    if not state_path.exists():
-        return dict(_DEFAULT_STATE)
-    return json.loads(state_path.read_text(encoding="utf-8"))
+    return load_state_file(state_path, default=_DEFAULT_STATE)
 
 
 def _save_state(state_path: Path, state: dict[str, Any]) -> None:
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(
-        json.dumps(state, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    save_state_file(state_path, state)
 
 
 # ---------------------------------------------------------------------------
@@ -333,16 +329,16 @@ def bump_rubric(
 # ---------------------------------------------------------------------------
 
 def _infer_state_path(rubric_path: Path) -> Path:
-    """Try to find .job-state.json relative to the rubric file."""
-    # Walk up from rubric path looking for .job-state.json
+    """Try to find the workspace state file relative to the rubric file."""
+    # Walk up from rubric path looking for the workspace state file.
     current = rubric_path.parent
     for _ in range(5):
-        candidate = current / ".job-state.json"
+        candidate = current / STATE_FILENAME
         if candidate.exists():
             return candidate
         current = current.parent
     # Default: assume project root is parent of rubrics/
-    return rubric_path.parent.parent / ".job-state.json"
+    return rubric_path.parent.parent / STATE_FILENAME
 
 
 def _gather_scored_jobs(

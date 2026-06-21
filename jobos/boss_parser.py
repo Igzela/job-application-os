@@ -205,7 +205,10 @@ def classify_boss_page(html: str, *, url: str = "", title: str = "") -> PageClas
             recovery="Pause automation and retry later from the logged-in browser session.",
             signals=signals,
         )
-    if _has_any(body_text, ["登录后查看", "立即登录", "扫码登录", "账号密码登录", "未登录"]):
+    if _has_any(
+        body_text,
+        ["登录后查看", "立即登录", "登录/注册", "扫码登录", "账号密码登录", "未登录"],
+    ):
         return PageClassification(
             state="login_required",
             reason="Login prompt text was detected.",

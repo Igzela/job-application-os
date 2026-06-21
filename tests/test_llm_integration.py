@@ -11,6 +11,7 @@ from jobos.llm.conversation import Conversation
 from jobos.llm.prompts import INTRO_SYSTEM, JOB_MATCH_SYSTEM, GREETING_SYSTEM, SCAM_CHECK_SYSTEM
 from jobos.llm.job_analyzer import analyze_match, generate_greeting, check_scam, explain_scores
 from jobos.llm.provider import get_llm_adapter, _read_claude_config
+from jobos.job_analysis import analyze_workspace_job
 
 
 class TestReadClaudeConfig:
@@ -120,6 +121,30 @@ class TestJobAnalyzer:
         profile = {"name": "Test"}
         result = explain_scores(llm, scores, job, profile)
         assert isinstance(result, str)
+
+    def test_analyze_workspace_job_loads_state_job(self, tmp_path):
+        (tmp_path / ".job-state.json").write_text(
+            json.dumps(
+                {
+                    "jobs": {
+                        "job-1": {
+                            "title": "Backend Engineer",
+                            "company": "Acme",
+                            "status": "imported",
+                        }
+                    }
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        result = analyze_workspace_job(tmp_path, "job-1", MockLLMAdapter())
+
+        assert result.job_data["title"] == "Backend Engineer"
+        assert isinstance(result.scam, dict)
+        assert isinstance(result.match, dict)
+        assert isinstance(result.explanation, str)
 
 
 class TestOrchestrator:

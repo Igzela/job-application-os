@@ -7,12 +7,15 @@ dry-run mode with browser interaction, and error handling.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
 
+from jobos.cli import _cmd_auto_submit, _cmd_submit
 from jobos.submitter import (
     BOSS_FIELD_MAP,
+    BatchSummary,
     PLATFORM_MAPS,
     SubmitResult,
     get_platform_fields,
@@ -50,6 +53,12 @@ def _mock_connect():
 
     page.title.return_value = "BOSS Zhipin - Job Search"
     page.url = "https://www.zhipin.com/"
+    page.content.return_value = (
+        "<html><body><div class='job-card-box'>"
+        "<a class='job-name'>Python Engineer</a>"
+        "<span class='job-salary'>20-30K</span>"
+        "</div></body></html>"
+    )
     page.screenshot.return_value = None
 
     context.pages = [page]
@@ -199,12 +208,51 @@ class TestSubmitApplication:
         assert result.page_title == "BOSS Zhipin - Search Results"
 
     @patch("jobos.submitter._connect_browser")
+    def test_dry_run_waits_for_browser_page_readiness(
+        self,
+        mock_connect,
+        tmp_path: Path,
+    ) -> None:
+        pw, browser, context, page = _mock_connect()
+        mock_connect.return_value = pw, browser, context, page
+        _make_pack_dir(tmp_path, "job-023-ready")
+
+        submit_application("job-023-ready", "boss", str(tmp_path), cdp_port=None)
+
+        page.wait_for_load_state.assert_any_call("load", timeout=5000)
+        page.wait_for_load_state.assert_any_call("networkidle", timeout=5000)
+        page.wait_for_function.assert_called_once()
+
+    @patch("jobos.submitter._connect_browser")
     def test_browser_crash_returns_error(self, mock_connect, tmp_path: Path) -> None:
         mock_connect.side_effect = RuntimeError("Browser crashed")
         _make_pack_dir(tmp_path, "job-024")
         result = submit_application("job-024", "boss", str(tmp_path), cdp_port=None)
         assert result.error is not None
         assert "Browser crashed" in result.error
+
+    @patch("jobos.submitter._connect_browser")
+    def test_dry_run_blank_boss_page_returns_error(
+        self,
+        mock_connect,
+        tmp_path: Path,
+    ) -> None:
+        pw, browser, context, page = _mock_connect()
+        page.title.return_value = ""
+        page.url = "https://www.zhipin.com/"
+        page.content.return_value = "<html><body></body></html>"
+        mock_connect.return_value = pw, browser, context, page
+        _make_pack_dir(tmp_path, "job-024-blank")
+
+        result = submit_application(
+            "job-024-blank",
+            "boss",
+            str(tmp_path),
+            cdp_port=None,
+        )
+
+        assert result.error is not None
+        assert "BOSS page did not load" in result.error
 
     @patch("jobos.submitter._connect_browser")
     def test_screenshot_path_format(self, mock_connect, tmp_path: Path) -> None:
@@ -235,6 +283,90 @@ class TestSubmitApplication:
         browser.close.assert_called_once()
         pw.stop.assert_called_once()
         assert result.error is not None
+
+
+class TestSubmitCli:
+    """CLI submit commands expose browser failures to callers."""
+
+    @patch("jobos.submitter.submit_application")
+    def test_cmd_submit_exits_on_result_error(self, mock_submit) -> None:
+        mock_submit.return_value = SubmitResult(
+            job_id="job-cli",
+            platform="boss",
+            dry_run=True,
+            fields_filled={"招呼语": "hello"},
+            error="CDP browser unavailable",
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            _cmd_submit(
+                SimpleNamespace(
+                    job="job-cli",
+                    platform="boss",
+                    confirm=False,
+                    port=9222,
+                    headless=False,
+                    standalone_browser=False,
+                )
+            )
+
+        assert exc.value.code == 1
+
+    @patch("jobos.submitter.submit_application")
+    def test_cmd_submit_standalone_browser_uses_no_cdp_port(
+        self,
+        mock_submit,
+    ) -> None:
+        mock_submit.return_value = SubmitResult(
+            job_id="job-cli",
+            platform="boss",
+            dry_run=True,
+            fields_filled={},
+        )
+
+        _cmd_submit(
+            SimpleNamespace(
+                job="job-cli",
+                platform="boss",
+                confirm=False,
+                port=9222,
+                headless=True,
+                standalone_browser=True,
+            )
+        )
+
+        assert mock_submit.call_args.kwargs["cdp_port"] is None
+
+    @patch("jobos.submitter.auto_submit_batch")
+    @patch("jobos.cli._get_root")
+    def test_cmd_auto_submit_batch_exits_on_summary_errors(
+        self,
+        mock_root,
+        mock_batch,
+        tmp_path: Path,
+    ) -> None:
+        mock_root.return_value = tmp_path
+        mock_batch.return_value = BatchSummary(
+            total_attempted=1,
+            total_failed=1,
+            errors=["browser unavailable"],
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            _cmd_auto_submit(
+                SimpleNamespace(
+                    job=None,
+                    confirm=False,
+                    port=9222,
+                    headless=False,
+                    standalone_browser=False,
+                    max_jobs=1,
+                    interval_min=1,
+                    interval_max=2,
+                )
+            )
+
+        assert exc.value.code == 1
 
 
 # ---------------------------------------------------------------------------

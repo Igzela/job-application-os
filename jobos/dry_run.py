@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 _DEFAULT_FORM = Path(__file__).resolve().parent / "adapters" / "local_mock_form" / "application_form.html"
 
 
+class DryRunInputError(ValueError):
+    """Raised when workspace dry-run inputs are missing."""
+
+
 def _build_field_mapping(pack: ApplicationPack) -> Dict[str, str]:
     """Derive a flat field_name -> value mapping from pack metadata.
 
@@ -238,3 +242,24 @@ def run_dry_run(
             "before submission."
         ),
     }
+
+
+def run_workspace_dry_run(state_dir: str | Path, job_id: str) -> Dict[str, Any]:
+    """Run a dry-run using pack files and mock form paths from a workspace."""
+    from .application_pack import load_application_pack
+    from .workspace import application_dir
+
+    state_dir = Path(state_dir)
+    pack_dir = application_dir(state_dir, job_id)
+    if not pack_dir.exists():
+        raise DryRunInputError(
+            f"No application pack for {job_id}. Run `job pack` first."
+        )
+
+    pack = load_application_pack(pack_dir, job_id=job_id)
+
+    mock_form = state_dir / "adapters" / "local_mock_form" / "application_form.html"
+    if not mock_form.exists():
+        mock_form = state_dir / "tests" / "fixtures" / "mock_form.html"
+
+    return run_dry_run(job_id, pack, mock_form)

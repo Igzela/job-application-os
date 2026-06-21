@@ -54,8 +54,10 @@ class TestMockLLMAdapter:
 
 class TestProvider:
     def test_get_adapter_returns_mock_by_default(self):
-        with patch.dict(os.environ, {}, clear=True), \
-             patch("jobos.llm.provider._read_claude_config", return_value={}):
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "jobos.config.load_env_values",
+            return_value={},
+        ):
             adapter = get_llm_adapter({"use_local_config": False})
             assert isinstance(adapter, MockLLMAdapter)
 
@@ -86,7 +88,31 @@ class TestProvider:
             get_llm_adapter({"provider": "unknown", "api_key": "k", "base_url": "http://x"})
 
     def test_get_adapter_env_fallback(self):
-        with patch.dict(os.environ, {"JOBOS_PROVIDER": "mock"}), \
-             patch("jobos.llm.provider._read_claude_config", return_value={}):
+        with patch.dict(os.environ, {"JOBOS_PROVIDER": "mock"}):
             adapter = get_llm_adapter({"use_local_config": False})
             assert isinstance(adapter, MockLLMAdapter)
+
+    def test_get_adapter_does_not_read_claude_config_without_opt_in(self):
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "jobos.config.load_env_values",
+            return_value={},
+        ), patch("jobos.llm.provider._read_claude_config") as read_claude:
+            adapter = get_llm_adapter({"use_local_config": False})
+
+        assert isinstance(adapter, MockLLMAdapter)
+        read_claude.assert_not_called()
+
+    def test_process_environment_overrides_yaml_config(self):
+        with patch.dict(os.environ, {"JOBOS_PROVIDER": "mock"}), patch(
+            "jobos.config.load_config",
+            return_value={
+                "llm": {
+                    "provider": "anthropic",
+                    "api_key_env": "JOBOS_API_KEY",
+                    "base_url": "https://api.anthropic.com",
+                }
+            },
+        ):
+            adapter = get_llm_adapter()
+
+        assert isinstance(adapter, MockLLMAdapter)

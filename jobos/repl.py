@@ -18,6 +18,18 @@ from rich.table import Table
 from rich.text import Text
 from rich import box
 
+from .workspace import (
+    APPLICATIONS_DIR,
+    JOBS_DIR,
+    PREDICTIONS_DIR,
+    RETROS_DIR,
+    jobs_normalized_dir,
+    jobs_raw_dir,
+    load_state,
+    save_state,
+    state_path as workspace_state_path,
+)
+
 console = Console()
 
 
@@ -177,11 +189,11 @@ def _cmd_help():
 
 
 def _cmd_jobs(root: Path):
-    f = root / ".job-state.json"
+    f = workspace_state_path(root)
     if not f.exists():
         console.print("[dim]暂无职位。用 /boss 或 /import 导入。[/dim]")
         return
-    state = json.loads(f.read_text())
+    state = load_state(root)
     jobs = state.get("jobs", {})
     if not jobs:
         console.print("[dim]暂无职位。[/dim]")
@@ -223,11 +235,11 @@ def _cmd_job(root: Path, args):
         console.print("[yellow]用法:[/yellow] /job <job_id>")
         return
     jid = args[0]
-    f = root / ".job-state.json"
+    f = workspace_state_path(root)
     if not f.exists():
         console.print("[dim]无状态文件。[/dim]")
         return
-    state = json.loads(f.read_text())
+    state = load_state(root)
     j = state.get("jobs", {}).get(jid)
     if not j:
         console.print(f"[red]未找到:[/red] {jid}")
@@ -344,12 +356,11 @@ def _cmd_import(root: Path, args):
 
     from jobos.importer import import_job
     try:
-        data = import_job(path, str(root / "jobs" / "normalized"))
-        state_path = root / ".job-state.json"
-        state = json.loads(state_path.read_text()) if state_path.exists() else {"jobs": {}}
+        data = import_job(path, str(jobs_normalized_dir(root)))
+        state = load_state(root)
         state["jobs"][data["job_id"]] = {"title": data["title"], "company": data["company"],
                                            "status": "imported", "location": data.get("location", "")}
-        state_path.write_text(json.dumps(state, indent=2) + "\n")
+        save_state(root, state)
         console.print(f"[green]✅[/green] {data['title']} @ {data['company']}")
     except Exception as e:
         console.print(f"[red]❌ {e}[/red]")
@@ -371,10 +382,9 @@ def _cmd_boss(root: Path, args):
             console.print("[dim]未找到职位。[/dim]")
             return
 
-        raw_dir = root / "jobs" / "raw"
+        raw_dir = jobs_raw_dir(root)
         raw_dir.mkdir(parents=True, exist_ok=True)
-        state_path = root / ".job-state.json"
-        state = json.loads(state_path.read_text()) if state_path.exists() else {"jobs": {}}
+        state = load_state(root)
         ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
 
         for i, job in enumerate(jobs):
@@ -384,7 +394,7 @@ def _cmd_boss(root: Path, args):
             state["jobs"][jid] = {"title": job["title"], "company": job["company"],
                                    "status": "imported", "source": "boss_zhipin", "link": job.get("link", "")}
 
-        state_path.write_text(json.dumps(state, indent=2) + "\n")
+        save_state(root, state)
 
         t = Table(box=box.ROUNDED, border_style="green", title=f"[bold]✅ 导入 {len(jobs)} 个职位[/bold]")
         t.add_column("职位", style="bold")
@@ -512,7 +522,7 @@ def _cmd_settings(root: Path):
     t.add_column("项目")
     t.add_column("状态")
 
-    for d in ["profile", "jobs", "predictions", "applications", "retros", "rubrics"]:
+    for d in ["profile", JOBS_DIR, PREDICTIONS_DIR, APPLICATIONS_DIR, RETROS_DIR, "rubrics"]:
         ok = (root / d).is_dir()
         t.add_row(f"{d}/", "[green]✅[/green]" if ok else "[red]❌[/red]")
 
@@ -532,11 +542,11 @@ def _cmd_settings(root: Path):
 
 
 def _cmd_status(root: Path):
-    f = root / ".job-state.json"
+    f = workspace_state_path(root)
     if not f.exists():
         console.print("[dim]无状态数据。[/dim]")
         return
-    state = json.loads(f.read_text())
+    state = load_state(root)
     jobs = state.get("jobs", {})
     counts = {}
     for j in jobs.values():

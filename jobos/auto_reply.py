@@ -6,14 +6,15 @@ context-aware replies using the LLM, and sends them back.
 
 import json
 import time
-import random
 from pathlib import Path
 from datetime import datetime, timezone
 
 from .browser import get_browser
 from .llm.provider import get_llm_adapter
 from .llm.job_analyzer import generate_reply
-from .anti_detect import human_delay as _human_delay, is_business_hours, DailyRateLimiter
+from .automation_policy import DailyRateLimiter, is_business_hours
+from .boss_adapter import human_delay as _human_delay
+from .runtime_state import load_json_state, save_json_state
 
 
 # BOSS Zhipin chat selectors
@@ -141,19 +142,13 @@ def read_conversation(page, element_index=0):
 
 
 def send_reply(page, reply_text):
-    """Type and send a reply in the current chat using human-like typing."""
+    """Fill and send a reply in the current chat."""
     for selector in REPLY_TEXTAREA_SELECTORS:
         try:
             textarea = page.locator(selector).first
             if textarea.is_visible(timeout=3000):
                 textarea.click()
-                _human_delay(0.3, 0.8)
-                # 模拟逐字输入（反检测关键）
-                for char in reply_text:
-                    page.keyboard.type(char, delay=random.randint(50, 150))
-                    if random.random() < 0.05:  # 5% 概率短暂停顿
-                        _human_delay(0.3, 0.8)
-                _human_delay(1.0, 2.0)
+                textarea.fill(reply_text)
                 for send_sel in SEND_BUTTON_SELECTORS:
                     try:
                         btn = page.locator(send_sel).first
@@ -170,14 +165,15 @@ def send_reply(page, reply_text):
 
 def _load_reply_state(state_dir):
     state_file = state_dir / "auto_reply_state.json"
-    if state_file.exists():
-        return json.loads(state_file.read_text())
-    return {"replied": {}, "stats": {"total_replied": 0, "total_skipped": 0}}
+    return load_json_state(
+        state_file,
+        {"replied": {}, "stats": {"total_replied": 0, "total_skipped": 0}},
+    )
 
 
 def _save_reply_state(state_dir, state):
     state_file = state_dir / "auto_reply_state.json"
-    state_file.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+    save_json_state(state_file, state)
 
 
 def run_auto_reply_loop(
@@ -197,7 +193,7 @@ def run_auto_reply_loop(
 
         profile = load_profile(state_dir)
 
-    # 反检测：非工作时间自动切换 dry-run
+    # Safety policy: outside operating hours, force dry-run.
     if not dry_run and not is_business_hours():
         print("⚠️ 当前非工作时间 (9:00-21:00)，自动切换为模拟运行模式")
         dry_run = True
@@ -236,7 +232,7 @@ def run_auto_reply_loop(
 
     try:
         while replied_count < max_replies:
-            # 反检测：非工作时间暂停
+            # Pause live replies outside operating hours.
             if not dry_run and not is_business_hours():
                 print(f"\n🌙 非工作时间，暂停自动回复 (9:00-21:00)")
                 time.sleep(300)
@@ -249,7 +245,7 @@ def run_auto_reply_loop(
                 wait_until="domcontentloaded",
                 timeout=30000,
             )
-            _human_delay(3.0, 6.0)  # 反检测：随机延迟
+            _human_delay(3.0, 6.0)
             unread_chats = poll_messages(page)
             print(f"   发现 {len(unread_chats)} 条未读消息")
 
@@ -336,7 +332,7 @@ def run_auto_reply_loop(
                 _save_reply_state(state_dir, reply_state)
                 if not dry_run:
                     rate_limiter.record_reply()
-                _human_delay(5.0, 15.0)  # 反检测：回复间随机延迟
+                _human_delay(5.0, 15.0)
 
             print(f"\n⏳ 等待 {interval} 秒后重新检查...")
             time.sleep(interval)

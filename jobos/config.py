@@ -31,7 +31,6 @@ DEFAULT_CONFIG = {
         "cdp_url": "http://localhost:9222",
         "user_data_dir": "/tmp/chrome-boss",
         "headless": False,
-        "anti_detection": True,
     },
 
     "submit": {
@@ -74,14 +73,15 @@ DEFAULT_CONFIG = {
 }
 
 
-def _expand_env(value: str) -> str:
+def _expand_env(value: str, environ: dict[str, str] | None = None) -> str:
     """Expand ${VAR} or $VAR in string values."""
     if not isinstance(value, str):
         return value
+    environ = environ if environ is not None else dict(os.environ)
 
     def replacer(m):
         var = m.group(1) or m.group(2)
-        return os.environ.get(var, m.group(0))
+        return environ.get(var, m.group(0))
 
     return re.sub(r"\$\{(\w+)\}|\$(\w+)", replacer, value)
 
@@ -96,11 +96,13 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
-def _resolve_env_file():
-    """Load .env file into os.environ (simple key=value, no quoting)."""
-    if not ENV_FILE.exists():
-        return
-    for line in ENV_FILE.read_text().splitlines():
+def load_env_values(path: str | Path | None = None) -> dict[str, str]:
+    """Parse the Job OS env file without mutating process environment."""
+    path = Path(path) if path is not None else ENV_FILE
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
@@ -108,12 +110,17 @@ def _resolve_env_file():
             key, _, val = line.partition("=")
             key = key.strip()
             val = val.strip().strip("'\"")
-            os.environ.setdefault(key, val)
+            if key:
+                values[key] = val
+    return values
 
 
-def load_config() -> dict:
+def load_config(environ: dict[str, str] | None = None) -> dict:
     """Load config with deep merge over defaults."""
-    _resolve_env_file()
+    resolved_env = {
+        **load_env_values(),
+        **(dict(os.environ) if environ is None else environ),
+    }
 
     if not CONFIG_FILE.exists():
         return copy.deepcopy(DEFAULT_CONFIG)
@@ -126,7 +133,7 @@ def load_config() -> dict:
     # Expand env vars in string values
     def expand(obj):
         if isinstance(obj, str):
-            return _expand_env(obj)
+            return _expand_env(obj, resolved_env)
         elif isinstance(obj, dict):
             return {k: expand(v) for k, v in obj.items()}
         elif isinstance(obj, list):
@@ -210,8 +217,8 @@ def config_wizard():
     if m:
         config["llm"]["model"] = m
 
-    print(f"当前base_url: {config['llm']['base_url'] or '(从Claude Code配置自动读取)'}")
-    u = input("Base URL (留空自动读取): ").strip()
+    print(f"当前base_url: {config['llm']['base_url'] or '(未配置)'}")
+    u = input("Base URL (留空保持不变): ").strip()
     if u:
         config["llm"]["base_url"] = u
 

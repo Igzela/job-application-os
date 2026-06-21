@@ -19,16 +19,11 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-
-_STATE_FILENAME = ".job-state.json"
-_PREDICTIONS_DIR = "predictions"
+from .workspace import load_state, predictions_dir as workspace_predictions_dir
 
 
 def _load_state(state_dir: Path) -> Dict[str, Any]:
-    path = state_dir / _STATE_FILENAME
-    if not path.exists():
-        return {"jobs": {}, "active_rubric": "unknown", "rubric_history": []}
-    return json.loads(path.read_text(encoding="utf-8"))
+    return load_state(state_dir)
 
 
 def _load_latest_prediction(predictions_dir: Path, job_id: str) -> Optional[Dict[str, Any]]:
@@ -123,7 +118,7 @@ def recommend_jobs(
     """
     state_dir = Path(state_dir)
     state = _load_state(state_dir)
-    predictions_dir = state_dir / _PREDICTIONS_DIR
+    predictions_dir = workspace_predictions_dir(state_dir)
 
     scored: List[Dict[str, Any]] = []
 

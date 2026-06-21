@@ -15,11 +15,9 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .workspace import load_state, retros_dir, save_state
 
 # -- State file helpers -------------------------------------------------------
-
-_STATE_FILENAME = ".job-state.json"
-_RETROS_DIR = "retros"
 
 # Retro check windows (days after submission)
 _WINDOW_3D = 3
@@ -28,15 +26,11 @@ _WINDOW_30D = 30
 
 
 def _load_state(state_dir: Path) -> Dict[str, Any]:
-    path = state_dir / _STATE_FILENAME
-    if not path.exists():
-        return {"jobs": {}, "active_rubric": "v0", "rubric_history": []}
-    return json.loads(path.read_text(encoding="utf-8"))
+    return load_state(state_dir)
 
 
 def _save_state(state_dir: Path, state: Dict[str, Any]) -> None:
-    path = state_dir / _STATE_FILENAME
-    path.write_text(json.dumps(state, indent=2, ensure_ascii=False) + "\n")
+    save_state(state_dir, state)
 
 
 def _now_iso() -> str:
@@ -44,7 +38,7 @@ def _now_iso() -> str:
 
 
 def _retros_dir(state_dir: Path) -> Path:
-    return state_dir / _RETROS_DIR
+    return retros_dir(state_dir)
 
 
 # -- Public API ---------------------------------------------------------------
@@ -71,6 +65,8 @@ def record_submission(
     Raises:
         KeyError: if the job_id does not exist in .job-state.json jobs.
     """
+    from .pipeline import record_external_submission
+
     state_dir = Path(state_dir)
     state = _load_state(state_dir)
 
@@ -82,6 +78,7 @@ def record_submission(
 
     now = _now_iso()
     job = state["jobs"][job_id]
+    record_external_submission(job)
     job["submitted_at"] = now
     job["submission_channel"] = channel
     job["retro"] = {
@@ -155,7 +152,10 @@ def record_retro(
         retro_meta.get("status_14d"),
         retro_meta.get("status_30d"),
     ]):
+        from .pipeline import transition_job
+
         retro_meta["complete"] = True
+        transition_job(job, "retro")
 
     _save_state(state_dir, state)
 

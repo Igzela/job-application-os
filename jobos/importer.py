@@ -2,6 +2,7 @@ import os
 import re
 import hashlib
 from datetime import datetime, timezone
+from pathlib import Path
 
 import yaml
 
@@ -12,6 +13,14 @@ def import_job(file_path: str, jobs_dir: str) -> dict:
 
     with open(file_path, encoding="utf-8") as f:
         content = f.read()
+
+    return import_job_text(content, jobs_dir, source_file=os.path.basename(file_path))
+
+
+def import_job_text(content: str, jobs_dir: str | Path, *, source_file: str = "stdin") -> dict:
+    """Import raw job description text into normalized YAML."""
+    if not content.strip():
+        raise ValueError("No job description text")
 
     title = _extract_field(content, r"(?:^|\n)#+\s*(.+)") or "Unknown Title"
     company = _extract_field(
@@ -36,7 +45,7 @@ def import_job(file_path: str, jobs_dir: str) -> dict:
         "company": company.strip(),
         "location": location.strip(),
         "skills": skills,
-        "source_file": os.path.basename(file_path),
+        "source_file": source_file,
         "imported_at": datetime.now(timezone.utc).isoformat(),
         "raw_content_hash": hashlib.sha256(content.encode()).hexdigest()[:16],
     }
@@ -47,6 +56,25 @@ def import_job(file_path: str, jobs_dir: str) -> dict:
         yaml.dump(job_data, f, default_flow_style=False, sort_keys=False)
 
     return job_data
+
+
+def import_pasted_job(state_dir: str | Path, jd_text: str) -> dict:
+    """Import pasted JD text and update workspace state."""
+    from .workspace import jobs_normalized_dir, load_state, save_state
+
+    state_dir = Path(state_dir)
+    data = import_job_text(jd_text, jobs_normalized_dir(state_dir), source_file="stdin")
+    state = load_state(state_dir)
+    state["jobs"][data["job_id"]] = {
+        "title": data["title"],
+        "company": data["company"],
+        "location": data.get("location", ""),
+        "status": "imported",
+        "captured_at": data.get("imported_at", ""),
+        "source_file": "stdin",
+    }
+    save_state(state_dir, state)
+    return data
 
 
 def _extract_field(text: str, pattern: str, flags=0) -> str | None:

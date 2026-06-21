@@ -7,6 +7,7 @@ from pathlib import Path
 
 SCRIPTS = [
     "scripts/audit_env.sh",
+    "scripts/check_architecture.sh",
     "scripts/local_ci.sh",
     "scripts/pipeline_dry_run.sh",
 ]
@@ -29,3 +30,14 @@ def test_operational_scripts_are_executable() -> None:
     for rel in SCRIPTS:
         path = root / rel
         assert path.stat().st_mode & 0o111
+
+
+def test_architecture_guard_is_read_only() -> None:
+    root = Path(__file__).parent.parent
+    text = (root / "scripts" / "check_architecture.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "git reset" not in text
+    assert "git clean" not in text
+    assert "unlink(" not in text

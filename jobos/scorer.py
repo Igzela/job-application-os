@@ -12,6 +12,8 @@ Hard gates (skip or penalize):
 from __future__ import annotations
 
 import re
+import json
+from pathlib import Path
 from typing import Any, Dict, List
 
 
@@ -474,3 +476,43 @@ def score_job(
         "skip_reason": None,
         "penalties": penalties,
     }
+
+
+def score_workspace_job(state_dir: str | Path, job_id: str) -> dict[str, Any]:
+    """Score a normalized workspace job and update workspace state."""
+    import yaml
+
+    from .pipeline import transition_job
+    from .profile_loader import load_evidence_bank, load_profile
+    from .workspace import jobs_normalized_dir, load_state, save_state
+
+    state_dir = Path(state_dir)
+    yaml_path = jobs_normalized_dir(state_dir) / f"{job_id}.yaml"
+    json_path = jobs_normalized_dir(state_dir) / f"{job_id}.json"
+    if yaml_path.exists():
+        job_data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+    elif json_path.exists():
+        job_data = json.loads(json_path.read_text(encoding="utf-8"))
+    else:
+        raise FileNotFoundError(f"Job {job_id} not found in jobs/normalized/")
+
+    profile = load_profile(state_dir)
+    evidence = load_evidence_bank(state_dir)
+    rubric_path = state_dir / "rubrics" / "v0_student_internship.md"
+    rubric = {"target_roles": profile.get("target_roles", [])}
+    if rubric_path.exists():
+        from .rubric_manager import load_rubric
+
+        rubric = load_rubric(str(rubric_path))
+
+    scores = score_job(job_data, profile, evidence, rubric)
+    state = load_state(state_dir)
+    if job_id in state["jobs"]:
+        transition_job(state["jobs"][job_id], "scored")
+        state["jobs"][job_id]["scores"] = {
+            key: value
+            for key, value in scores.items()
+            if key not in ("skipped", "skip_reason")
+        }
+        save_state(state_dir, state)
+    return scores

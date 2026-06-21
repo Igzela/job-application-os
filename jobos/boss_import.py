@@ -7,16 +7,29 @@ user logged into BOSS Zhipin.
 
 import json
 import os
+import re
 import shutil
 import subprocess
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .boss_parser import classify_boss_page, extract_boss_job_list
+from .workspace import jobs_raw_dir, load_state, save_state
 
 ADAPTER_DIR = Path(__file__).resolve().parent / "adapters" / "boss"
 SCRIPT_PATH = ADAPTER_DIR / "read-boss.mjs"
+
+
+@dataclass(frozen=True)
+class BossWorkspaceImportResult:
+    jobs: list[dict]
+    job_ids: list[str]
+
+    @property
+    def imported(self) -> int:
+        return len(self.job_ids)
 
 
 def import_from_boss(
@@ -173,6 +186,69 @@ def import_from_boss(
         jobs.append(job)
 
     return jobs
+
+
+def import_boss_jobs_to_workspace(
+    state_dir: str | Path,
+    keyword: str,
+    city_code: str = "100010000",
+    port: int = 9222,
+    *,
+    use_scrapling: bool | None = True,
+    record_diagnostics: bool | None = True,
+    include_html_snapshot: bool = True,
+    html_snapshot_limit: int = 250000,
+) -> BossWorkspaceImportResult:
+    """Import BOSS jobs and persist raw JSON plus state entries."""
+    jobs = import_from_boss(
+        keyword,
+        city_code,
+        port,
+        use_scrapling=use_scrapling,
+        record_diagnostics=record_diagnostics,
+        include_html_snapshot=include_html_snapshot,
+        html_snapshot_limit=html_snapshot_limit,
+    )
+    if not jobs:
+        return BossWorkspaceImportResult(jobs=[], job_ids=[])
+
+    raw_dir = jobs_raw_dir(state_dir)
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    state = load_state(state_dir)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    job_ids: list[str] = []
+
+    for i, job in enumerate(jobs):
+        slug = re.sub(r"[^a-z0-9]+", "-", job["title"].lower()).strip("-")[:40]
+        job_id = f"{ts}-boss-{i:03d}-{slug}"
+        raw_path = raw_dir / f"{job_id}.json"
+        raw_path.write_text(
+            json.dumps(job, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+        state["jobs"][job_id] = {
+            "title": job["title"],
+            "company": job["company"],
+            "location": job.get("city_code", city_code),
+            "status": "imported",
+            "captured_at": job.get("imported_at", ""),
+            "source": "boss_zhipin",
+            "keyword": keyword,
+            "link": job.get("link", ""),
+        }
+        if job.get("extractor"):
+            state["jobs"][job_id]["extractor"] = job["extractor"]
+        if job.get("page_state"):
+            state["jobs"][job_id]["page_state"] = job["page_state"]
+        if job.get("extraction_diagnostics"):
+            state["jobs"][job_id]["extraction_diagnostics"] = job[
+                "extraction_diagnostics"
+            ]
+        job_ids.append(job_id)
+
+    save_state(state_dir, state)
+    return BossWorkspaceImportResult(jobs=jobs, job_ids=job_ids)
 
 
 def _load_extraction_config() -> dict[str, Any]:

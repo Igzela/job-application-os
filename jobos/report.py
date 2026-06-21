@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .workspace import load_state, predictions_dir, retros_dir
+
 
 # Pipeline stages in order
 STAGES = ["imported", "scored", "predicted", "packed", "submitted"]
@@ -28,14 +30,11 @@ STAGES = ["imported", "scored", "predicted", "packed", "submitted"]
 # ---------------------------------------------------------------------------
 
 def _load_state(state_dir: Path) -> Dict[str, Any]:
-    path = state_dir / ".job-state.json"
-    if not path.exists():
-        return {"jobs": {}, "active_rubric": "unknown", "rubric_history": [], "opportunities": []}
-    return json.loads(path.read_text(encoding="utf-8"))
+    return load_state(state_dir)
 
 
 def _load_retros(state_dir: Path) -> List[Dict[str, Any]]:
-    retro_dir = state_dir / "retros"
+    retro_dir = retros_dir(state_dir)
     if not retro_dir.is_dir():
         return []
     retros: List[Dict[str, Any]] = []
@@ -48,7 +47,7 @@ def _load_retros(state_dir: Path) -> List[Dict[str, Any]]:
 
 
 def _load_predictions(state_dir: Path) -> List[Dict[str, Any]]:
-    pred_dir = state_dir / "predictions"
+    pred_dir = predictions_dir(state_dir)
     if not pred_dir.is_dir():
         return []
     preds: List[Dict[str, Any]] = []

@@ -199,7 +199,7 @@ def tmp_state_dir(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     (tmp_path / "predictions").mkdir()
-    (tmp_path / "packs").mkdir()
+    (tmp_path / "applications").mkdir()
     (tmp_path / "retros").mkdir()
     return tmp_path
 

@@ -1,35 +1,11 @@
-# Availability constraints for Alex Chen
-# Ref: profile/base.yaml for personal details
-
-internship_window:
-  start: "2026-06-01"
-  end: "2026-08-15"
-  duration_weeks: 10
-
-weekly_capacity:
-  days_per_week: 5
-  preferred_hours_per_day: 8
-  max_hours_per_week: 40
-
-work_arrangement:
-  open_to_remote: true
-  open_to_hybrid: true
-  open_to_onsite: true
-  preferred: hybrid
-
 target_locations:
-  - San Francisco, CA
-  - Seattle, WA
-  - New York, NY
-  - Austin, TX
-
-timezone: America/Los_Angeles
-
-constraints:
-  - Must be enrolled as a full-time student during the internship period
-  - Requires at least 2 weeks notice before start date
-  - Not available on US federal holidays falling within the window
-
-notes: |
-  Available full-time for summer 2026 software engineering internships.
-  Can relocate to any target city for the duration of the internship.
+  - 珠三角
+  - 广州
+  - 深圳
+work_arrangement: on-site
+min_salary: 0
+max_salary: 0
+target_role: 能源相关实习
+preferences:
+  - 大厂优先
+  - AI与专业知识结合方向

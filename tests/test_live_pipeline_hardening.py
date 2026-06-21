@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from jobos.live_pipeline import (
@@ -243,6 +244,11 @@ def test_live_pipeline_max_jobs_counts_successful_submissions(tmp_path: Path, mo
     assert result["submitted"] == 1
     assert result["analyzed"] == 2
     assert searched == ["Python后端", "Django"]
+    run_dir = Path(result["run_dir"])
+    assert (run_dir / "plan.json").exists()
+    assert (run_dir / "events.jsonl").exists()
+    assert (run_dir / "summary.json").exists()
+    assert not (tmp_path / "pipeline_results.json").exists()
 
 
 def test_live_pipeline_skips_duplicate_before_apply(tmp_path: Path, monkeypatch) -> None:
@@ -286,3 +292,41 @@ def test_live_pipeline_skips_duplicate_before_apply(tmp_path: Path, monkeypatch)
     assert result["submitted"] == 0
     assert result["results"][0]["status"] == "skipped_duplicate"
     assert result["results"][0]["skip_reason"] == "duplicate_job_id"
+
+
+def test_live_submit_candidate_persists_shared_attempt_record(tmp_path: Path, monkeypatch) -> None:
+    from jobos import orchestrator
+
+    class Page:
+        url = "https://zhipin.com/job/live-1"
+
+        def content(self):
+            return "<html><body><button>立即沟通</button></body></html>"
+
+        def title(self):
+            return "BOSS job detail"
+
+    monkeypatch.setattr("jobos.boss_adapter.click_chat_button", lambda _page: False)
+    monkeypatch.setattr(
+        "jobos.boss_adapter.take_screenshot",
+        lambda _page, path: str(path),
+    )
+
+    result = orchestrator._submit_candidate(
+        Page(),
+        {"job_id": "live-1", "company": "星河科技", "title": "Python后端", "link": "https://zhipin.com/job/live-1"},
+        "你好，我是张嘉桓。",
+        tmp_path,
+    )
+
+    assert result["status"] == "no_chat_button"
+    assert result["attempt_path"]
+    attempt = json.loads(Path(result["attempt_path"]).read_text(encoding="utf-8"))
+    assert attempt["schema_version"] == 1
+    assert attempt["job_id"] == "live-1"
+    assert attempt["platform"] == "boss"
+    assert attempt["mode"] == "live"
+    assert attempt["status"] == "failed"
+    assert attempt["error_class"] == "no_chat_button"
+    assert attempt["result"]["submit_phase"] == "chat_button"
+    assert attempt["page_diagnostics"]

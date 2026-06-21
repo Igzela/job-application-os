@@ -62,6 +62,18 @@ class Prediction:
         return d
 
 
+@dataclass(frozen=True)
+class WorkspacePredictionResult:
+    """Result of creating a prediction from workspace state."""
+    prediction: Prediction
+    path: Path
+    created_new_version: bool = False
+
+
+class PredictionInputError(ValueError):
+    """Raised when workspace state lacks data required for prediction."""
+
+
 # ── Probability model ────────────────────────────────────────────────────────
 
 def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
@@ -338,4 +350,69 @@ def load_prediction(job_id: str, predictions_dir: Path | str) -> Prediction:
         decision=data["decision"],
         notes=data.get("notes", ""),
         version=data.get("version", 1),
+    )
+
+
+def _next_prediction_version(job_id: str, prediction_dir: Path) -> int:
+    versions: list[int] = []
+    prefix = f"{job_id}_v"
+    for path in prediction_dir.glob("*_v*.json"):
+        stem = path.stem
+        if not stem.startswith(prefix):
+            continue
+        suffix = stem[len(prefix):]
+        if suffix.isdigit():
+            versions.append(int(suffix))
+    return max(versions, default=0) + 1
+
+
+def predict_workspace_job(
+    state_dir: str | Path,
+    job_id: str,
+    *,
+    new_version: bool = False,
+) -> WorkspacePredictionResult:
+    """Create a prediction from workspace state and mark the job predicted."""
+    from .pipeline import transition_job
+    from .profile_loader import load_profile
+    from .workspace import load_state, predictions_dir, save_state
+
+    state = load_state(state_dir)
+    if job_id not in state["jobs"]:
+        raise PredictionInputError(f"Job {job_id} not found. Import and score first.")
+
+    job_entry = state["jobs"][job_id]
+    scores = job_entry.get("scores", {})
+    if not scores or "final_score" not in scores:
+        raise PredictionInputError(
+            f"Job {job_id} not scored yet. Run `job score --job {job_id}` first."
+        )
+
+    profile = load_profile(state_dir)
+    job_data = {"job_id": job_id, **job_entry}
+    prediction = create_prediction(job_data, scores, profile)
+    prediction_dir = predictions_dir(state_dir)
+
+    created_new_version = False
+    try:
+        path = save_prediction(prediction, prediction_dir)
+    except FileExistsError:
+        if not new_version:
+            raise
+        next_version = _next_prediction_version(job_id, prediction_dir)
+        prediction = create_prediction(
+            {**job_data, "version": next_version},
+            scores,
+            profile,
+        )
+        path = save_prediction(prediction, prediction_dir)
+        created_new_version = True
+
+    transition_job(state["jobs"][job_id], "predicted")
+    save_state(state_dir, state)
+
+    return WorkspacePredictionResult(
+        prediction=prediction,
+        path=path,
+        created_new_version=created_new_version,
     )

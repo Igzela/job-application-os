@@ -17,12 +17,196 @@ validate_pack() flags any unsupported claims.
 from __future__ import annotations
 
 import re
+import yaml
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Set
 
 from .models import ApplicationPack, Job, Prediction
-from .profile_loader import load_evidence_bank, load_profile
-from .evidence_markers import find_evidence_source
+from .profile_loader import (
+    load_evidence_bank,
+    load_profile,
+    validate_profile_consistency,
+)
+from .evidence_markers import find_evidence_source, generate_evidence_report
+
+
+@dataclass(frozen=True)
+class WorkspacePackResult:
+    """Result of generating and saving a pack from workspace state."""
+    pack: ApplicationPack
+    warnings: list[str]
+    pack_dir: Path
+
+
+class PackInputError(ValueError):
+    """Raised when workspace state lacks data required for pack generation."""
+
+
+@dataclass(frozen=True)
+class CandidateFacts:
+    """Normalized profile/evidence facts used by pack renderers."""
+    name: str
+    first_name: str
+    email: str
+    location: str
+    languages: list[str]
+    education: list[dict]
+    school: str
+    study: str
+    graduation_date: str
+    gpa: str
+    programming_languages: list[str]
+    frameworks: list[str]
+    programming_language_labels: list[str]
+    framework_labels: list[str]
+    domain_labels: list[str]
+    availability_start: str
+    availability_end: str
+    days_per_week: Any
+    work_arrangement: Any
+    work_preference: str
+    target_locations: list[str]
+    constraints: list[str]
+    project_names: list[str]
+
+
+def _skill_names(entries: Any) -> list[str]:
+    if not isinstance(entries, list):
+        return []
+    names: list[str] = []
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("name"):
+            names.append(entry["name"])
+        elif isinstance(entry, str):
+            names.append(entry)
+    return names
+
+
+def _skill_label(entry: Any) -> str:
+    if isinstance(entry, str):
+        return entry
+    if not isinstance(entry, dict):
+        return ""
+    name = entry.get("name", "")
+    proficiency = entry.get("proficiency", "")
+    return f"{name} ({proficiency})" if name and proficiency else name
+
+
+def _domain_label(entry: Any) -> str:
+    if isinstance(entry, str):
+        return entry
+    if not isinstance(entry, dict):
+        return ""
+    name = entry.get("name", "")
+    proficiency = entry.get("proficiency", "")
+    tools = entry.get("tools", [])
+    label = f"{name} ({proficiency})" if name and proficiency else name
+    if tools:
+        label += f" [{', '.join(tools)}]"
+    return label
+
+
+def derive_candidate_facts(profile: dict, evidence: list[dict]) -> CandidateFacts:
+    """Normalize repeated candidate facts from profile and evidence bank data."""
+    raw_name = profile.get("name", "")
+    name = raw_name or "Candidate"
+    education = profile.get("education", [])
+    if not isinstance(education, list):
+        education = []
+    primary_education = education[0] if education else {}
+
+    school = primary_education.get("institution", "") or profile.get("school", "")
+    study = (
+        primary_education.get("major", "")
+        or primary_education.get("degree", "")
+        or profile.get("major", "")
+    )
+    graduation_date = (
+        primary_education.get("graduation_date", "")
+        or profile.get("graduation_date", "")
+    )
+    gpa = str(primary_education.get("gpa", "") or "")
+
+    skills_data = profile.get("skills", {})
+    if not isinstance(skills_data, dict):
+        skills_data = {}
+    programming_languages = _skill_names(skills_data.get("programming_languages", []))
+    frameworks = _skill_names(skills_data.get("frameworks", []))
+    programming_language_entries = skills_data.get("programming_languages", [])
+    framework_entries = skills_data.get("frameworks", [])
+    domain_entries = skills_data.get("domains", [])
+
+    internship_window = profile.get("internship_window", {})
+    if not isinstance(internship_window, dict):
+        internship_window = {}
+    availability_window = internship_window
+    if not availability_window:
+        availability = profile.get("availability", {})
+        if isinstance(availability, dict):
+            availability_window = availability
+    availability_start = (
+        profile.get("availability_start", "")
+        or availability_window.get("start", "")
+        or availability_window.get("availability_start", "")
+    )
+    availability_end = (
+        profile.get("availability_end", "")
+        or availability_window.get("end", "")
+        or availability_window.get("availability_end", "")
+    )
+    weekly_capacity = profile.get("weekly_capacity", {})
+    if not isinstance(weekly_capacity, dict):
+        weekly_capacity = {}
+    days_per_week = profile.get("days_per_week", "") or weekly_capacity.get(
+        "days_per_week",
+        "",
+    )
+
+    work_arrangement = profile.get("work_arrangement", {})
+    if isinstance(work_arrangement, dict):
+        work_preference = work_arrangement.get("preferred", "")
+    else:
+        work_preference = str(work_arrangement)
+
+    languages = [
+        text
+        for text in (_format_language(language) for language in profile.get("languages", []))
+        if text
+    ]
+
+    return CandidateFacts(
+        name=name,
+        first_name=raw_name.split()[0] if raw_name else "there",
+        email=profile.get("email", ""),
+        location=profile.get("location", ""),
+        languages=languages,
+        education=education,
+        school=school,
+        study=study,
+        graduation_date=graduation_date,
+        gpa=gpa,
+        programming_languages=programming_languages,
+        frameworks=frameworks,
+        programming_language_labels=[
+            label for label in (_skill_label(entry) for entry in programming_language_entries) if label
+        ],
+        framework_labels=[
+            label for label in (_skill_label(entry) for entry in framework_entries) if label
+        ],
+        domain_labels=[
+            label for label in (_domain_label(entry) for entry in domain_entries) if label
+        ],
+        availability_start=availability_start,
+        availability_end=availability_end,
+        days_per_week=days_per_week,
+        work_arrangement=work_arrangement,
+        work_preference=work_preference,
+        target_locations=profile.get("target_locations", []),
+        constraints=profile.get("constraints", []),
+        project_names=[entry.get("title", "") for entry in evidence if entry.get("title")],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -243,32 +427,25 @@ def _generate_resume(
     Returns (markdown_text, list_of_warnings) where warnings flag any section
     that may need review.
     """
+    facts = derive_candidate_facts(profile, evidence)
     warnings: List[str] = []
     lines: List[str] = []
 
     # --- Name and contact ---
-    name = profile.get("name", "Candidate")
-    location = profile.get("location", "")
-    languages = profile.get("languages", [])
-    email = profile.get("email", "")
-
-    lines.append(f"# {name}")
+    lines.append(f"# {facts.name}")
     contact_parts = []
-    if location:
-        contact_parts.append(location)
-    if email:
-        contact_parts.append(email)
-    language_texts = [
-        text for text in (_format_language(language) for language in languages) if text
-    ]
-    if language_texts:
-        contact_parts.append(", ".join(language_texts))
+    if facts.location:
+        contact_parts.append(facts.location)
+    if facts.email:
+        contact_parts.append(facts.email)
+    if facts.languages:
+        contact_parts.append(", ".join(facts.languages))
     if contact_parts:
         lines.append(" | ".join(contact_parts))
     lines.append("")
 
     # --- Education ---
-    edu_list = profile.get("education", [])
+    edu_list = facts.education
     if edu_list:
         lines.append("## Education\n")
         for edu in edu_list:
@@ -298,38 +475,18 @@ def _generate_resume(
         warnings.append("No education data found in profile.")
 
     # --- Skills ---
-    skills_data = profile.get("skills", {})
-    prog_langs = skills_data.get("programming_languages", [])
-    frameworks = skills_data.get("frameworks", [])
-    domains = skills_data.get("domains", [])
-
-    if prog_langs or frameworks or domains:
+    if (
+        facts.programming_language_labels
+        or facts.framework_labels
+        or facts.domain_labels
+    ):
         lines.append("## Skills\n")
-        if prog_langs:
-            lang_strs = []
-            for lang in prog_langs:
-                name_s = lang.get("name", "")
-                prof = lang.get("proficiency", "")
-                lang_strs.append(f"{name_s} ({prof})" if prof else name_s)
-            lines.append(f"**Languages:** {', '.join(lang_strs)}")
-        if frameworks:
-            fw_strs = []
-            for fw in frameworks:
-                name_s = fw.get("name", "")
-                prof = fw.get("proficiency", "")
-                fw_strs.append(f"{name_s} ({prof})" if prof else name_s)
-            lines.append(f"**Frameworks:** {', '.join(fw_strs)}")
-        if domains:
-            dom_strs = []
-            for dom in domains:
-                name_s = dom.get("name", "")
-                prof = dom.get("proficiency", "")
-                tools = dom.get("tools", [])
-                entry = f"{name_s} ({prof})" if prof else name_s
-                if tools:
-                    entry += f" [{', '.join(tools)}]"
-                dom_strs.append(entry)
-            lines.append(f"**Domains:** {', '.join(dom_strs)}")
+        if facts.programming_language_labels:
+            lines.append(f"**Languages:** {', '.join(facts.programming_language_labels)}")
+        if facts.framework_labels:
+            lines.append(f"**Frameworks:** {', '.join(facts.framework_labels)}")
+        if facts.domain_labels:
+            lines.append(f"**Domains:** {', '.join(facts.domain_labels)}")
         lines.append("")
 
     # --- Projects (from evidence bank) ---
@@ -382,24 +539,16 @@ def _generate_resume(
         warnings.append("No evidence bank entries found. Resume has no project section.")
 
     # --- Availability ---
-    avail = profile.get("internship_window", profile.get("availability", {}))
-    if isinstance(avail, dict):
-        start = avail.get("start", avail.get("availability_start", ""))
-        end = avail.get("end", avail.get("availability_end", ""))
-        if start or end:
-            lines.append("## Availability\n")
-            if start and end:
-                lines.append(f"Available {start} to {end}")
-            elif start:
-                lines.append(f"Available from {start}")
-            lines.append("")
-    elif profile.get("availability_start"):
+    if facts.availability_start or facts.availability_end:
         lines.append("## Availability\n")
-        lines.append(f"Available {profile['availability_start']} to {profile.get('availability_end', 'TBD')}")
+        if facts.availability_start and facts.availability_end:
+            lines.append(f"Available {facts.availability_start} to {facts.availability_end}")
+        elif facts.availability_start:
+            lines.append(f"Available from {facts.availability_start}")
         lines.append("")
 
     # --- Work arrangement ---
-    wa = profile.get("work_arrangement", {})
+    wa = facts.work_arrangement
     if wa:
         if isinstance(wa, dict):
             prefs = []
@@ -422,69 +571,34 @@ def _generate_resume(
 
 def _generate_greeting(job_data: dict, profile: dict, evidence: list[dict]) -> str:
     """Greeting message derived entirely from profile and evidence bank."""
-    name = profile.get("name", "")
+    facts = derive_candidate_facts(profile, evidence)
     company = job_data.get("company", "")
     title = job_data.get("title", "open position")
 
-    first_name = name.split()[0] if name else "there"
-
-    # Education — derive from profile only
-    school = ""
-    degree = ""
-    edu_list = profile.get("education", [])
-    if edu_list:
-        school = edu_list[0].get("institution", "")
-        degree = edu_list[0].get("major", edu_list[0].get("degree", ""))
-    if not school:
-        school = profile.get("school", "")
-    if not degree:
-        degree = profile.get("major", "")
-
-    grad = ""
-    if edu_list:
-        grad = edu_list[0].get("graduation_date", "")
-    if not grad:
-        grad = profile.get("graduation_date", "")
-
-    # Skills — derive from profile only
-    skills_data = profile.get("skills", {})
-    prog_langs = skills_data.get("programming_languages", [])
-    lang_names = [l.get("name", "") for l in prog_langs[:3] if l.get("name")]
-
-    # Availability — derive from profile only
-    avail_start = profile.get("availability_start", "")
-    if not avail_start:
-        iw = profile.get("internship_window", {})
-        if isinstance(iw, dict):
-            avail_start = iw.get("start", "")
-
     # Build greeting from derived data
-    lines = [f"Hello! I'm {first_name}"]
-    if degree and school:
-        lines[0] += f", a {degree} student at {school}"
-    elif school:
-        lines[0] += f", a student at {school}"
-    if grad:
-        lines[0] += f" (expected graduation {grad})"
+    lines = [f"Hello! I'm {facts.first_name}"]
+    if facts.study and facts.school:
+        lines[0] += f", a {facts.study} student at {facts.school}"
+    elif facts.school:
+        lines[0] += f", a student at {facts.school}"
+    if facts.graduation_date:
+        lines[0] += f" (expected graduation {facts.graduation_date})"
     lines[0] += f". I'm very interested in the {title} role at {company}."
 
     # Evidence-based experience summary
     if evidence:
-        project_names = [e.get("title", "") for e in evidence[:3] if e.get("title")]
+        project_names = facts.project_names[:3]
         if project_names:
             lines.append(
-                f"\nI have experience with {', '.join(lang_names) if lang_names else 'relevant technologies'} "
-                f"through projects including {', '.join(project_names)}."
+                f"\nRelevant evidence includes: {', '.join(project_names)}."
             )
-        else:
-            lines.append(f"\nI have experience with {', '.join(lang_names) if lang_names else 'relevant technologies'}.")
-    elif lang_names:
-        lines.append(f"\nI have experience with {', '.join(lang_names)} through coursework and personal projects.")
-    else:
-        lines.append("\nI have relevant technical experience through coursework and personal projects.")
+    elif facts.programming_languages:
+        lines.append(
+            f"\nTechnical focus: {', '.join(facts.programming_languages[:3])}."
+        )
 
-    if avail_start:
-        lines.append(f"\nI'm available starting {avail_start} and am excited about the opportunity to contribute to your team.")
+    if facts.availability_start:
+        lines.append(f"\nI'm available starting {facts.availability_start} and am excited about the opportunity to contribute to your team.")
     else:
         lines.append("\nI'm excited about the opportunity to contribute to your team.")
 
@@ -495,44 +609,25 @@ def _generate_greeting(job_data: dict, profile: dict, evidence: list[dict]) -> s
 
 def _generate_cover_letter(job_data: dict, profile: dict, evidence: list[dict]) -> str:
     """Short cover letter — every claim derived from profile or evidence bank."""
-    name = profile.get("name", "Candidate")
+    facts = derive_candidate_facts(profile, evidence)
     company = job_data.get("company", "your company")
     title = job_data.get("title", "the open position")
 
     highlights = evidence[:2] if evidence else []
 
-    # Education — from profile only
-    school = ""
-    degree = ""
-    edu_list = profile.get("education", [])
-    if edu_list:
-        school = edu_list[0].get("institution", "")
-        degree = edu_list[0].get("major", edu_list[0].get("degree", ""))
-    if not school:
-        school = profile.get("school", "")
-    if not degree:
-        degree = profile.get("major", "")
-
-    # Availability — from profile only
-    avail_start = profile.get("availability_start", "")
-    if not avail_start:
-        iw = profile.get("internship_window", {})
-        if isinstance(iw, dict):
-            avail_start = iw.get("start", "")
-
     lines = [f"Dear Hiring Team,\n"]
 
     # Intro — derive degree/major from profile, never hardcode
-    if degree and school:
+    if facts.study and facts.school:
         lines.append(
             f"I am writing to express my interest in the {title} position at {company}. "
-            f"As a {degree} student at {school}, I bring a strong foundation in "
+            f"As a {facts.study} student at {facts.school}, I bring a strong foundation in "
             f"technical problem-solving.\n"
         )
-    elif school:
+    elif facts.school:
         lines.append(
             f"I am writing to express my interest in the {title} position at {company}. "
-            f"As a student at {school}, I bring relevant technical experience.\n"
+            f"As a student at {facts.school}, I bring relevant technical experience.\n"
         )
     else:
         lines.append(
@@ -564,69 +659,22 @@ def _generate_cover_letter(job_data: dict, profile: dict, evidence: list[dict]) 
         lines.append("")
 
     # Availability — from profile only
-    if avail_start:
-        lines.append(f"I am available starting {avail_start} and eager to contribute to your team.\n")
+    if facts.availability_start:
+        lines.append(f"I am available starting {facts.availability_start} and eager to contribute to your team.\n")
     else:
         lines.append("I am eager to contribute to your team.\n")
 
     lines.append("Thank you for your consideration.\n")
-    lines.append(f"Best regards,\n{name}")
+    lines.append(f"Best regards,\n{facts.name}")
 
     return "\n".join(lines)
 
 
 def _generate_form_answers(job_data: dict, profile: dict, evidence: list[dict]) -> str:
     """Common form Q&A — every answer derived from profile and evidence bank."""
+    facts = derive_candidate_facts(profile, evidence)
     company = job_data.get("company", "")
     title = job_data.get("title", "")
-
-    # Education — from profile only
-    school = ""
-    degree = ""
-    edu_list = profile.get("education", [])
-    if edu_list:
-        school = edu_list[0].get("institution", "")
-        degree = edu_list[0].get("major", edu_list[0].get("degree", ""))
-        grad = edu_list[0].get("graduation_date", "TBD")
-        gpa = edu_list[0].get("gpa", "")
-    else:
-        school = profile.get("school", "")
-        degree = profile.get("major", "")
-        grad = profile.get("graduation_date", "TBD")
-        gpa = ""
-
-    # Skills — from profile only
-    skills_data = profile.get("skills", {})
-    all_skills = []
-    for lang in skills_data.get("programming_languages", []):
-        if lang.get("name"):
-            all_skills.append(lang["name"])
-    for fw in skills_data.get("frameworks", []):
-        if fw.get("name"):
-            all_skills.append(fw["name"])
-
-    location = profile.get("location", "")
-
-    # Project names — from evidence bank only
-    project_names = [e.get("title", "") for e in evidence if e.get("title")]
-
-    # Availability — from profile only
-    avail_start = profile.get("availability_start", "")
-    if not avail_start:
-        iw = profile.get("internship_window", {})
-        if isinstance(iw, dict):
-            avail_start = iw.get("start", "")
-    avail_end = profile.get("availability_end", "")
-    if not avail_end:
-        iw = profile.get("internship_window", {})
-        if isinstance(iw, dict):
-            avail_end = iw.get("end", "")
-
-    days_per_week = profile.get("days_per_week", "")
-    if not days_per_week:
-        wc = profile.get("weekly_capacity", {})
-        if isinstance(wc, dict):
-            days_per_week = wc.get("days_per_week", "")
 
     lines = ["# Form Answers\n"]
 
@@ -639,6 +687,7 @@ def _generate_form_answers(job_data: dict, profile: dict, evidence: list[dict]) 
 
     # Q: Why this role?
     lines.append(f"**Q: Why this role?**")
+    all_skills = facts.programming_languages + facts.frameworks
     skill_str = ", ".join(all_skills[:4]) if all_skills else "relevant technologies"
     lines.append(
         f"A: The {title} position matches my skills in {skill_str} "
@@ -648,56 +697,49 @@ def _generate_form_answers(job_data: dict, profile: dict, evidence: list[dict]) 
     # Q: Tell us about yourself — derive from profile + evidence, never hardcode
     lines.append("**Q: Tell us about yourself.**")
     intro = f"A: I'm"
-    if degree and school:
-        intro += f" a {degree} student at {school}"
-    elif school:
-        intro += f" a student at {school}"
+    if facts.study and facts.school:
+        intro += f" a {facts.study} student at {facts.school}"
+    elif facts.school:
+        intro += f" a student at {facts.school}"
     else:
         intro += " a motivated student"
-    intro += f" (expected {grad})" if grad and grad != "TBD" else ""
-    intro += f" with a {gpa} GPA." if gpa else "."
+    intro += f" (expected {facts.graduation_date})" if facts.graduation_date else ""
+    intro += f" with a {facts.gpa} GPA." if facts.gpa else "."
 
-    if project_names:
-        intro += f" I've worked on projects including {', '.join(project_names[:3])}."
+    if facts.project_names:
+        intro += f" I've worked on projects including {', '.join(facts.project_names[:3])}."
     intro += "\n"
     lines.append(intro)
 
     # Q: Availability — from profile only
     lines.append("**Q: When are you available?**")
-    if avail_start:
-        end_str = avail_end or "the end of the internship window"
-        dpw = f", {days_per_week} days/week" if days_per_week else ""
-        lines.append(f"A: I'm available from {avail_start} to {end_str}{dpw}.\n")
+    if facts.availability_start:
+        end_str = facts.availability_end or "the end of the internship window"
+        dpw = f", {facts.days_per_week} days/week" if facts.days_per_week else ""
+        lines.append(f"A: I'm available from {facts.availability_start} to {end_str}{dpw}.\n")
     else:
         lines.append("A: Please see my profile for availability details.\n")
 
     # Q: Work arrangement preference
     lines.append("**Q: Preferred work arrangement?**")
-    wa = profile.get("work_arrangement", {})
-    if isinstance(wa, dict):
-        preferred = wa.get("preferred", "")
-    else:
-        preferred = str(wa)
-    if preferred:
-        lines.append(f"A: I prefer {preferred} but am open to other arrangements.\n")
+    if facts.work_preference:
+        lines.append(f"A: I prefer {facts.work_preference} but am open to other arrangements.\n")
     else:
         lines.append("A: TODO: Confirm work arrangement preference before submitting.\n")
 
     # Q: Location
     lines.append("**Q: Current location / willing to relocate?**")
-    targets = profile.get("target_locations", [])
-    if location and targets:
-        lines.append(f"A: Currently based in {location}. Willing to relocate to {', '.join(targets)}.\n")
-    elif location:
-        lines.append(f"A: Based in {location}.\n")
+    if facts.location and facts.target_locations:
+        lines.append(f"A: Currently based in {facts.location}. Willing to relocate to {', '.join(facts.target_locations)}.\n")
+    elif facts.location:
+        lines.append(f"A: Based in {facts.location}.\n")
     else:
         lines.append("A: Please see my profile for location details.\n")
 
     # Q: Notice period
     lines.append("**Q: How much notice do you need?**")
-    constraints = profile.get("constraints", [])
     notice = None
-    for c in constraints:
+    for c in facts.constraints:
         if "notice" in c.lower():
             notice = c
             break
@@ -921,3 +963,76 @@ def generate_pack_from_dir(
     warnings = validate_pack(pack, evidence)
 
     return pack, warnings
+
+
+def generate_workspace_pack(state_dir: str | Path, job_id: str) -> WorkspacePackResult:
+    """Generate, validate, save, and mark an application pack for a workspace job."""
+    from .application_pack import workspace_pack_sources, write_application_pack
+    from .pipeline import PipelineTransitionError, transition_job
+    from .predictor import load_prediction
+    from .workspace import (
+        application_dir,
+        jobs_normalized_dir,
+        load_state,
+        predictions_dir,
+        save_state,
+    )
+
+    state = load_state(state_dir)
+    if job_id not in state["jobs"]:
+        raise PackInputError(f"Job {job_id} not found.")
+
+    job_entry = state["jobs"][job_id]
+    job_yaml = jobs_normalized_dir(state_dir) / f"{job_id}.yaml"
+    if job_yaml.exists():
+        job_data = yaml.safe_load(job_yaml.read_text(encoding="utf-8")) or {}
+    else:
+        job_data = {"job_id": job_id, **job_entry}
+
+    profile = load_profile(state_dir)
+    profile_errors = validate_profile_consistency(profile)
+    if profile_errors:
+        raise PackInputError(
+            "Profile identity conflict: " + "; ".join(profile_errors)
+        )
+    try:
+        transition_job(job_entry, "packed")
+    except PipelineTransitionError as exc:
+        raise PackInputError(str(exc)) from exc
+    job_entry.pop("validation", None)
+
+    try:
+        prediction = load_prediction(job_id, predictions_dir(state_dir))
+    except FileNotFoundError as exc:
+        raise PackInputError(
+            f"No prediction for {job_id}. Run `job predict` first."
+        ) from exc
+
+    evidence = load_evidence_bank(state_dir)
+    pack = generate_pack(job_data, prediction.to_dict(), profile, evidence)
+    report = generate_evidence_report(
+        pack.files,
+        evidence,
+        job_data,
+        profile_data=profile,
+    )
+    warnings = [
+        f"[{item['file']}] Unsupported claim: {item['claim']}"
+        for item in report["unsupported"]
+    ]
+    warnings.extend(
+        f"Weak claim: {item['claim']} ({item['reason']})"
+        for item in report["weak"]
+    )
+
+    pack_dir = application_dir(state_dir, job_id)
+    write_application_pack(
+        pack_dir,
+        pack,
+        sources=workspace_pack_sources(state_dir, job_id),
+    )
+
+    job_entry["pack_warnings"] = warnings
+    save_state(state_dir, state)
+
+    return WorkspacePackResult(pack=pack, warnings=warnings, pack_dir=pack_dir)

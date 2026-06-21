@@ -12,6 +12,7 @@ from typing import Any, Iterable
 from bs4 import BeautifulSoup
 
 from .boss_parser import classify_boss_page, parse_job_detail, scrapling_available
+from .runtime_state import load_json_state, save_json_state, update_json_state
 
 
 CONTACT_STATE_FILE = ".job-contact-state.json"
@@ -213,21 +214,15 @@ def classify_boss_contact_state(text_or_html: str) -> str:
 
 def load_contact_state(state_dir: str | Path) -> dict[str, Any]:
     path = Path(state_dir) / CONTACT_STATE_FILE
-    if not path.exists():
-        return {"jobs": {}, "urls": {}, "company_titles": {}}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {"jobs": {}, "urls": {}, "company_titles": {}}
-    data.setdefault("jobs", {})
-    data.setdefault("urls", {})
-    data.setdefault("company_titles", {})
-    return data
+    return load_json_state(
+        path,
+        {"jobs": {}, "urls": {}, "company_titles": {}},
+    )
 
 
 def save_contact_state(state_dir: str | Path, state: dict[str, Any]) -> dict[str, Any]:
     path = Path(state_dir) / CONTACT_STATE_FILE
-    path.write_text(json.dumps(state, indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+    save_json_state(path, state)
     return state
 
 
@@ -237,7 +232,6 @@ def record_contacted_job(
     *,
     status: str = "contacted",
 ) -> dict[str, Any]:
-    state = load_contact_state(state_dir)
     now = datetime.now(timezone.utc).isoformat()
     record = {
         "job_id": job.get("job_id") or "",
@@ -247,14 +241,22 @@ def record_contacted_job(
         "status": status,
         "timestamp": now,
     }
-    if record["job_id"]:
-        state["jobs"][record["job_id"]] = record
-    if record["url"]:
-        state["urls"][record["url"]] = record
-    pair = _company_title_key(record)
-    if pair:
-        state["company_titles"][pair] = record
-    return save_contact_state(state_dir, state)
+    path = Path(state_dir) / CONTACT_STATE_FILE
+
+    def update(state: dict[str, Any]) -> None:
+        if record["job_id"]:
+            state["jobs"][record["job_id"]] = record
+        if record["url"]:
+            state["urls"][record["url"]] = record
+        pair = _company_title_key(record)
+        if pair:
+            state["company_titles"][pair] = record
+
+    return update_json_state(
+        path,
+        {"jobs": {}, "urls": {}, "company_titles": {}},
+        update,
+    )
 
 
 def is_duplicate_job(job: dict[str, Any], state: dict[str, Any], *, match_company_title: bool = True) -> DuplicateCheck:

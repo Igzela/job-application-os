@@ -10,7 +10,14 @@ Provides three capabilities:
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Set
+
+import yaml
+
+
+class EvidenceReportInputError(ValueError):
+    """Raised when workspace evidence report inputs are missing."""
 
 
 # ---------------------------------------------------------------------------
@@ -34,16 +41,27 @@ def _title_to_slug(title: str) -> str:
     "Project 1: DeepSeek Boss Helper" -> "project-1-deepseek-boss-helper"
     """
     slug = title.lower().strip()
-    slug = re.sub(r"[^a-z0-9]+", "-", slug)
+    slug = re.sub(r"[^\w]+", "-", slug, flags=re.UNICODE)
+    slug = slug.replace("_", "-")
     return slug.strip("-")
 
 
 def _extract_keywords(text: str) -> Set[str]:
-    """Extract significant words (3+ chars, not stop words) from text."""
+    """Extract significant Latin, CJK, and numeric claim tokens."""
+    text = re.sub(r"<!--.*?-->", " ", text, flags=re.DOTALL)
+    words = re.findall(
+        r"[a-zA-Z][a-zA-Z0-9+#.]+|[\u3400-\u9fff]+|\d+(?:\.\d+)?",
+        text,
+    )
     return {
-        w.lower()
-        for w in re.findall(r"[a-zA-Z][a-zA-Z0-9+#.]+", text)
-        if len(w) >= 3 and w.lower() not in _STOP_WORDS
+        word.lower()
+        for word in words
+        if (
+            (re.match(r"[a-zA-Z]", word) and len(word) >= 3)
+            or re.match(r"[\u3400-\u9fff]", word)
+            or re.match(r"\d", word)
+        )
+        and word.lower() not in _STOP_WORDS
     }
 
 
@@ -115,6 +133,16 @@ def _keyword_overlap(claim: str, text: str) -> float:
     return hits / len(words)
 
 
+def _flatten_profile_text(value: object) -> str:
+    if isinstance(value, dict):
+        return " ".join(_flatten_profile_text(item) for item in value.values())
+    if isinstance(value, list):
+        return " ".join(_flatten_profile_text(item) for item in value)
+    if value is None:
+        return ""
+    return str(value).lower()
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -157,6 +185,7 @@ def generate_evidence_report(
     pack_files: dict[str, str],
     evidence: list[dict],
     job_data: dict,
+    profile_data: dict | None = None,
 ) -> dict:
     """Audit every claim in *pack_files* against the evidence bank.
 
@@ -171,6 +200,7 @@ def generate_evidence_report(
         }
     """
     corpus = _build_evidence_corpus(evidence)
+    profile_text = _flatten_profile_text(profile_data or {})
 
     supported: list[dict] = []
     unsupported: list[dict] = []
@@ -210,6 +240,8 @@ def generate_evidence_report(
                     })
                 else:
                     supported.append({"claim": claim, "source": source})
+            elif profile_text and _keyword_overlap(claim, profile_text) >= 0.50:
+                supported.append({"claim": claim, "source": "profile"})
             else:
                 unsupported.append({"claim": claim, "file": filename})
 
@@ -237,6 +269,77 @@ def generate_evidence_report(
         "missing_jd_skills": missing_jd_skills,
         "overclaim_risk": round(overclaim_risk, 4),
     }
+
+
+def generate_workspace_evidence_report(state_dir: str | Path, job_id: str) -> dict:
+    """Generate an evidence report from saved workspace pack and job data."""
+    from .application_pack import (
+        load_application_pack,
+        update_pack_validation,
+        workspace_pack_sources,
+    )
+    from .pipeline import transition_job
+    from .profile_loader import load_evidence_bank, load_profile
+    from .runtime_state import save_json_state
+    from .workspace import (
+        application_dir,
+        jobs_normalized_dir,
+        load_state,
+        save_state,
+    )
+
+    state_dir = Path(state_dir)
+    pack_dir = application_dir(state_dir, job_id)
+    if not pack_dir.exists():
+        raise EvidenceReportInputError(
+            f"No application pack for {job_id}. Run `job pack` first."
+        )
+
+    pack_files = load_application_pack(pack_dir, job_id=job_id).files
+    evidence = load_evidence_bank(state_dir)
+    profile = load_profile(state_dir)
+
+    state = load_state(state_dir)
+    job_entry = state.get("jobs", {}).get(job_id, {})
+    job_yaml = jobs_normalized_dir(state_dir) / f"{job_id}.yaml"
+    if job_yaml.exists():
+        job_data = yaml.safe_load(job_yaml.read_text(encoding="utf-8")) or {}
+    else:
+        job_data = job_entry
+
+    report = generate_evidence_report(
+        pack_files,
+        evidence,
+        job_data,
+        profile_data=profile,
+    )
+    report_path = pack_dir / "validation_report.json"
+    save_json_state(
+        report_path,
+        {
+            "job_id": job_id,
+            **report,
+        },
+    )
+    report["report_path"] = str(report_path)
+    validation = {
+        "supported": len(report["supported"]),
+        "weak": len(report["weak"]),
+        "unsupported": len(report["unsupported"]),
+    }
+    if job_id in state.get("jobs", {}):
+        job = state["jobs"][job_id]
+        job["validation"] = validation
+        if validation["unsupported"] == 0:
+            transition_job(job, "validated")
+        save_state(state_dir, state)
+    update_pack_validation(
+        pack_dir,
+        job_id=job_id,
+        sources=workspace_pack_sources(state_dir, job_id),
+        validation=validation,
+    )
+    return report
 
 
 # ---------------------------------------------------------------------------

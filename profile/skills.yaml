@@ -1,44 +1,14 @@
-skills:
-  programming_languages:
-    - name: Python
-      proficiency: advanced
-      areas:
-        - data analysis
-        - machine learning
-        - scripting
-        - backend development
-
-    - name: JavaScript
-      proficiency: advanced
-      areas:
-        - frontend development
-        - Node.js
-        - async programming
-
-  frameworks:
-    - name: React
-      proficiency: advanced
-      areas:
-        - component architecture
-        - state management
-        - hooks
-
-  domains:
-    - name: Data Analysis
-      proficiency: intermediate
-      tools:
-        - pandas
-        - NumPy
-        - matplotlib
-        - SQL
-
-    - name: Machine Learning Basics
-      proficiency: intermediate
-      tools:
-        - scikit-learn
-        - TensorFlow
-        - PyTorch
-      concepts:
-        - supervised learning
-        - unsupervised learning
-        - model evaluation
+programming_languages: []
+frameworks: []
+domains:
+  - AI工具应用
+  - Agent软件（Claude Code、GPT、Codex等）
+  - GitHub项目维护与文档管理
+tools:
+  - Claude Code
+  - ChatGPT
+  - Codex
+  - GitHub
+languages:
+  - name: 英语
+    level: 雅思6.5

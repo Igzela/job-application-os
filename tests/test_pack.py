@@ -2,9 +2,20 @@
 
 from __future__ import annotations
 
-import pytest
+import json
 
-from jobos.pack_generator import generate_pack, validate_pack
+import pytest
+import yaml
+
+from jobos.application_pack import PackIntegrityError, load_application_pack
+from jobos.pack_generator import (
+    PackInputError,
+    derive_candidate_facts,
+    generate_pack,
+    generate_workspace_pack,
+    validate_pack,
+)
+from jobos.predictor import create_prediction, save_prediction
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +208,22 @@ class TestPackFileCompleteness:
         assert "Acme Corp" in jd
         assert "Software Engineering Intern" in jd
 
+    def test_greeting_avoids_generic_unverifiable_experience_claim(
+        self,
+        sample_job_data: dict,
+        sample_prediction: dict,
+        sample_profile: dict,
+        sample_evidence: list[dict],
+    ) -> None:
+        pack = generate_pack(
+            sample_job_data,
+            sample_prediction,
+            {"name": "Test Candidate"},
+            sample_evidence,
+        )
+
+        assert "relevant technologies" not in pack.files["greeting.md"]
+
     def test_prediction_contains_decision(
         self,
         sample_job_data: dict,
@@ -230,6 +257,22 @@ class TestPackFileCompleteness:
     ) -> None:
         pack = generate_pack(sample_job_data, sample_prediction, sample_profile, sample_evidence)
         assert pack.job_id == "test-001"
+
+
+def test_derive_candidate_facts_normalizes_profile_and_evidence(
+    sample_profile: dict,
+    sample_evidence: list[dict],
+) -> None:
+    facts = derive_candidate_facts(sample_profile, sample_evidence)
+
+    assert facts.first_name == "Alex"
+    assert facts.school == "UC Berkeley"
+    assert facts.study == "Computer Science"
+    assert facts.graduation_date == "May 2027"
+    assert facts.programming_languages == ["Python", "JavaScript"]
+    assert facts.frameworks == ["React", "FastAPI"]
+    assert facts.work_preference == "hybrid"
+    assert facts.project_names == ["Job Tracker Chrome Extension", "Data Analysis Pipeline"]
 
 
 # ---------------------------------------------------------------------------
@@ -420,3 +463,199 @@ class TestEdgeCases:
         assert d["job_id"] == "test-001"
         assert isinstance(d["files"], dict)
         assert len(d["files"]) == 7
+
+
+def test_generate_workspace_pack_writes_files_and_updates_state(
+    tmp_path,
+    sample_job_data: dict,
+) -> None:
+    job_id = sample_job_data["job_id"]
+    (tmp_path / "jobs" / "normalized").mkdir(parents=True)
+    (tmp_path / "jobs" / "normalized" / f"{job_id}.yaml").write_text(
+        yaml.safe_dump(sample_job_data, sort_keys=False),
+        encoding="utf-8",
+    )
+    (tmp_path / ".job-state.json").write_text(
+        json.dumps(
+            {
+                "jobs": {
+                    job_id: {
+                        "title": sample_job_data["title"],
+                        "company": sample_job_data["company"],
+                        "status": "predicted",
+                    }
+                },
+                "active_rubric": "v1",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    prediction = create_prediction(
+        {"job_id": job_id, "rubric_version": "v1"},
+        {
+            "fit": 7.0,
+            "evidence": 6.0,
+            "opportunity": 7.0,
+            "strategic": 6.0,
+            "friction": 3.0,
+            "risk": 2.0,
+            "final_score": 6.8,
+        },
+        {},
+    )
+    save_prediction(prediction, tmp_path / "predictions")
+
+    result = generate_workspace_pack(tmp_path, job_id)
+
+    state = json.loads((tmp_path / ".job-state.json").read_text(encoding="utf-8"))
+    assert state["jobs"][job_id]["status"] == "packed"
+    assert state["jobs"][job_id]["pack_warnings"] == result.warnings
+    assert result.pack_dir == tmp_path / "applications" / job_id
+    assert (result.pack_dir / "manifest.json").exists()
+    for filename in REQUIRED_FILES:
+        assert (result.pack_dir / filename).exists()
+        assert filename in result.pack.files
+
+    state["jobs"][job_id]["status"] = "validated"
+    state["jobs"][job_id]["validation"] = {
+        "supported": 1,
+        "weak": 0,
+        "unsupported": 0,
+    }
+    (tmp_path / ".job-state.json").write_text(
+        json.dumps(state) + "\n",
+        encoding="utf-8",
+    )
+
+    generate_workspace_pack(tmp_path, job_id)
+
+    repacked_state = json.loads(
+        (tmp_path / ".job-state.json").read_text(encoding="utf-8")
+    )
+    assert repacked_state["jobs"][job_id]["status"] == "packed"
+    assert "validation" not in repacked_state["jobs"][job_id]
+
+
+def test_generate_workspace_pack_manifest_tracks_profile_sources(
+    tmp_path,
+    sample_job_data: dict,
+    monkeypatch,
+) -> None:
+    job_id = sample_job_data["job_id"]
+    (tmp_path / "jobs" / "normalized").mkdir(parents=True)
+    (tmp_path / "jobs" / "normalized" / f"{job_id}.yaml").write_text(
+        yaml.safe_dump(sample_job_data, sort_keys=False),
+        encoding="utf-8",
+    )
+    profile_dir = tmp_path / "profile"
+    profile_dir.mkdir()
+    (profile_dir / "base.yaml").write_text("name: Alex Test\n", encoding="utf-8")
+    (profile_dir / "skills.yaml").write_text(
+        "skills:\n  programming_languages:\n    - name: Python\n",
+        encoding="utf-8",
+    )
+    (profile_dir / "availability.yaml").write_text(
+        "available: true\n",
+        encoding="utf-8",
+    )
+    (profile_dir / "evidence_bank.md").write_text(
+        "## Python Tool\n\nBuilt Python tools.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".job-state.json").write_text(
+        json.dumps(
+            {
+                "jobs": {
+                    job_id: {
+                        "title": sample_job_data["title"],
+                        "company": sample_job_data["company"],
+                        "status": "predicted",
+                    }
+                },
+                "active_rubric": "v1",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    prediction = create_prediction(
+        {"job_id": job_id, "rubric_version": "v1"},
+        {"fit": 7.0, "final_score": 6.8},
+        {"evidence_items": ["Python Tool"]},
+    )
+    save_prediction(prediction, tmp_path / "predictions")
+    monkeypatch.setattr(
+        "jobos.pack_generator.validate_pack",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("workspace generation must use canonical validator")
+        ),
+    )
+
+    result = generate_workspace_pack(tmp_path, job_id)
+    (profile_dir / "skills.yaml").write_text(
+        "skills:\n  programming_languages:\n    - name: Rust\n",
+        encoding="utf-8",
+    )
+
+    assert result.warnings == []
+    with pytest.raises(PackIntegrityError, match="source changed.*profile/skills"):
+        load_application_pack(
+            result.pack_dir,
+            require_manifest=True,
+            verify_sources=True,
+        )
+
+
+def test_generate_workspace_pack_rejects_inconsistent_profile(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    job_id = "profile-conflict"
+    (tmp_path / ".job-state.json").write_text(
+        json.dumps({"jobs": {job_id: {"status": "predicted"}}}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "jobos.pack_generator.load_profile",
+        lambda _root: {
+            "school": "长春理工大学",
+            "major": "过程装备与控制工程",
+            "education": [
+                {
+                    "institution": "University of California, Berkeley",
+                    "major": "Computer Science",
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(PackInputError, match="Profile identity conflict"):
+        generate_workspace_pack(tmp_path, job_id)
+
+
+def test_generate_workspace_pack_rejects_terminal_job_without_writes(
+    tmp_path,
+) -> None:
+    job_id = "already-submitted"
+    original_state = {"jobs": {job_id: {"status": "submitted"}}}
+    state_path = tmp_path / ".job-state.json"
+    state_path.write_text(
+        json.dumps(original_state) + "\n",
+        encoding="utf-8",
+    )
+    pack_dir = tmp_path / "applications" / job_id
+    pack_dir.mkdir(parents=True)
+    greeting_path = pack_dir / "greeting.md"
+    greeting_path.write_text("existing pack\n", encoding="utf-8")
+
+    with pytest.raises(
+        PackInputError,
+        match="Invalid job status transition: submitted -> packed",
+    ):
+        generate_workspace_pack(tmp_path, job_id)
+
+    assert json.loads(state_path.read_text(encoding="utf-8")) == original_state
+    assert greeting_path.read_text(encoding="utf-8") == "existing pack\n"
+    assert not (pack_dir / "manifest.json").exists()

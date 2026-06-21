@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from jobos.cli import _cmd_demo_seed
+from jobos.demo_seed import seed_demo_workspace
 
 
 class _Args:
@@ -21,6 +22,13 @@ def empty_dir(tmp_path: Path, monkeypatch) -> Path:
 
 
 class TestDemoSeed:
+    def test_seed_demo_workspace_returns_created_paths(self, empty_dir: Path):
+        result = seed_demo_workspace(empty_dir)
+
+        assert result.profile_dir == empty_dir / "profile"
+        assert result.rubric_path.exists()
+        assert result.sample_jd_path.exists()
+
     def test_creates_profile_files(self, empty_dir: Path):
         _cmd_demo_seed(_Args())
         assert (empty_dir / "profile" / "base.yaml").exists()

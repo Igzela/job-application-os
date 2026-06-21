@@ -1,21 +1,5 @@
 education:
-  - institution: University of California, Berkeley
-    degree: Bachelor of Science
-    major: Computer Science
-    location: Berkeley, CA
-    graduation_date: "2027-05-15"
-    gpa: 3.8
-    honors:
-      - Dean's List
-      - Phi Beta Kappa
-    relevant_coursework:
-      - Data Structures
-      - Algorithms
-      - Operating Systems
-      - Database Systems
-      - Artificial Intelligence
-      - Machine Learning
-    activities:
-      - ACM Student Chapter
-      - HackBerkeley
-      - Undergraduate Research Assistant
+  - institution: 长春理工大学
+    degree: bachelor
+    major: 过程装备与控制工程
+    graduation_date: "2027"

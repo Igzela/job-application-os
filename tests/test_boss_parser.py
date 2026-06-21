@@ -177,6 +177,18 @@ class TestBossExtraction:
         assert classification.state == state
         assert classification.recovery
 
+    def test_login_register_header_is_login_required(self) -> None:
+        html = """
+        <html><body>
+          <header><a>登录/注册</a></header>
+          <ul><li class="job-card-box">Python Engineer</li></ul>
+        </body></html>
+        """
+
+        classification = classify_boss_page(html)
+
+        assert classification.state == "login_required"
+
 
 class TestParseJobDetail:
     def test_extracts_title(self) -> None:

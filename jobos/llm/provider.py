@@ -6,25 +6,6 @@ from .base import LLMAdapter
 from .mock import MockLLMAdapter
 
 
-def _load_env_file():
-    """Load .env file if it exists."""
-    env_file = Path.home() / ".jobos" / ".env"
-    if not env_file.exists():
-        return
-    try:
-        with open(env_file) as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#') and '=' in line:
-                    key, value = line.split('=', 1)
-                    key = key.strip()
-                    value = value.strip().strip('"').strip("'")
-                    if key and key not in os.environ:
-                        os.environ[key] = value
-    except Exception:
-        pass
-
-
 def _read_claude_config() -> dict:
     """从Claude Code配置文件读取API key、URL和model"""
     config_path = Path.home() / ".claude" / "settings.json"
@@ -47,43 +28,58 @@ def _read_claude_config() -> dict:
 def get_llm_adapter(config: dict | None = None) -> LLMAdapter:
     """获取LLM适配器
 
-    优先级：
-    1. config参数（显式传入）
-    2. jobos config.yaml (via job config set)
-    3. 环境变量 (JOBOS_API_KEY, JOBOS_BASE_URL, JOBOS_PROVIDER, JOBOS_MODEL)
-    4. Claude Code配置文件 (~/.claude/settings.json)
-    5. Mock（无API时的降级）
+    Priority: explicit config, process environment, Job OS .env, config.yaml,
+    then deterministic mock. Claude Code config is read only when explicitly
+    enabled with ``use_claude_config=True``.
     """
-    # 加载 .env 文件
-    _load_env_file()
-
     if config is None:
         config = {}
 
     use_local_config = config.get("use_local_config", True)
+    from ..config import load_config, load_env_values
 
-    # 从config.yaml读取默认值
+    env = {**load_env_values(), **dict(os.environ)}
+
     yaml_config = {}
     if use_local_config:
-        try:
-            from ..config import load_config as _load_config
-            yaml_config = _load_config().get("llm", {})
-        except Exception:
-            yaml_config = {}
+        yaml_config = load_config(environ=env).get("llm", {})
 
-    provider = config.get("provider") or yaml_config.get("provider") or os.environ.get("JOBOS_PROVIDER", "")
+    provider = (
+        config.get("provider")
+        or env.get("JOBOS_PROVIDER")
+        or yaml_config.get("provider")
+        or ""
+    )
 
-    # mock provider always returns MockLLMAdapter
     if provider == "mock":
         return MockLLMAdapter.create()
 
-    api_key = config.get("api_key") or os.environ.get("JOBOS_API_KEY", "")
-    base_url = config.get("base_url") or yaml_config.get("base_url") or os.environ.get("JOBOS_BASE_URL", "")
-    model = config.get("model") or yaml_config.get("model") or os.environ.get("JOBOS_MODEL", "")
-    max_tokens = config.get("max_tokens") or yaml_config.get("max_tokens") or os.environ.get("JOBOS_MAX_TOKENS", 4096)
+    api_key_env = config.get("api_key_env") or yaml_config.get(
+        "api_key_env",
+        "JOBOS_API_KEY",
+    )
+    api_key = (
+        config.get("api_key")
+        or env.get("JOBOS_API_KEY")
+        or env.get(api_key_env, "")
+    )
+    base_url = (
+        config.get("base_url")
+        or env.get("JOBOS_BASE_URL")
+        or yaml_config.get("base_url", "")
+    )
+    model = (
+        config.get("model")
+        or env.get("JOBOS_MODEL")
+        or yaml_config.get("model", "")
+    )
+    max_tokens = (
+        config.get("max_tokens")
+        or env.get("JOBOS_MAX_TOKENS")
+        or yaml_config.get("max_tokens", 4096)
+    )
 
-    # 如果没配置，尝试从Claude Code配置读取
-    if not api_key or not base_url or not model:
+    if config.get("use_claude_config"):
         claude_config = _read_claude_config()
         if not api_key:
             api_key = claude_config.get("api_key", "")
@@ -92,14 +88,12 @@ def get_llm_adapter(config: dict | None = None) -> LLMAdapter:
         if not model:
             model = claude_config.get("model", "")
 
-    # 如果有key但没指定provider，自动检测
     if api_key and not provider:
         if "anthropic" in base_url.lower() or "claude" in base_url.lower():
             provider = "anthropic"
         else:
             provider = "openai"
 
-    # 没有API配置，返回Mock
     if not api_key or not base_url:
         return MockLLMAdapter.create()
 

@@ -1,7 +1,4 @@
-"""Browser connection manager with anti-detection stealth.
-
-Uses Patchright (patched Playwright) instead of vanilla Playwright.
-Patchright removes navigator.webdriver and other automation markers.
+"""Browser connection manager for explicit live automation.
 
 Default: connect to an already-running Chrome via CDP (port 9222).
 Standalone launch is opt-in with cdp_port=None and always uses an isolated profile.
@@ -19,22 +16,16 @@ from typing import Optional, Tuple
 
 def _get_sync_playwright():
     """Get sync_playwright module."""
-    try:
-        from patchright.sync_api import sync_playwright
-        return sync_playwright
-    except ImportError:
-        from playwright.sync_api import sync_playwright
-        return sync_playwright
+    from playwright.sync_api import sync_playwright
+
+    return sync_playwright
 
 
 def _get_async_playwright():
     """Get async_playwright module."""
-    try:
-        from patchright.async_api import async_playwright
-        return async_playwright
-    except ImportError:
-        from playwright.async_api import async_playwright
-        return async_playwright
+    from playwright.async_api import async_playwright
+
+    return async_playwright
 
 
 def _is_in_async_context():
@@ -57,17 +48,6 @@ PROFILE_DIRECTORY = os.environ.get("JOBOS_BROWSER_PROFILE_DIRECTORY", "Profile 1
 # not open a real browser profile because Chromium can rewrite cookie/session DBs.
 CHROME_PROFILE_DIR = None
 
-STEALTH_ARGS = [
-    "--no-sandbox",
-    "--disable-dev-shm-usage",
-    "--disable-blink-features=AutomationControlled",
-    "--disable-ipc-flooding-protection",
-    "--disable-backgrounding-occluded-windows",
-    "--enable-features=NetworkService,TrustTokens",
-    "--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4",
-]
-
-
 def connect_cdp(port: int = DEFAULT_CDP_PORT) -> Tuple:
     """Connect to user's Chrome via CDP."""
     sync_playwright = _get_sync_playwright()
@@ -86,7 +66,7 @@ def connect_cdp(port: int = DEFAULT_CDP_PORT) -> Tuple:
 
 
 def launch_standalone(headless: bool = False) -> Tuple:
-    """Launch Chromium with stealth flags and isolated persistent user data."""
+    """Launch Chromium with isolated persistent user data."""
     sync_playwright = _get_sync_playwright()
     pw = sync_playwright().start()
     try:
@@ -98,7 +78,7 @@ def launch_standalone(headless: bool = False) -> Tuple:
             user_data_dir=user_data_dir,
             headless=headless,
             executable_path=CHROMIUM_PATH,
-            args=STEALTH_ARGS + [
+            args=[
                 f"--remote-debugging-port={DEFAULT_CDP_PORT}",
                 f"--profile-directory={PROFILE_DIRECTORY}",
             ],
@@ -140,3 +120,22 @@ def get_browser(
             ) from exc
     pw, browser, context, page = launch_standalone(headless=headless)
     return pw, browser, context, page
+
+
+def wait_for_page_content(page, timeout_ms: int = 10000) -> None:
+    """Best-effort wait for an SPA to render visible body text."""
+    try:
+        page.wait_for_load_state("load", timeout=min(timeout_ms, 5000))
+    except Exception:
+        pass
+    try:
+        page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 5000))
+    except Exception:
+        pass
+    try:
+        page.wait_for_function(
+            "() => document.body && document.body.innerText.trim().length > 0",
+            timeout=timeout_ms,
+        )
+    except Exception:
+        pass

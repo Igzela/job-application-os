@@ -338,7 +338,7 @@ Implemented live-mode semantics for `job start`:
 - Search rotates configured keywords and stops on successful submissions, daily limit, or candidate budget.
 - Each candidate opens the detail page before scam check, match scoring, and greeting generation.
 - Detail extraction records full JD, requirements, location, salary, company, recruiter/contact hints, job status, communication state, extractor, page state, and diagnostics.
-- Detail extraction failures skip only the current candidate and are recorded in `pipeline_results.json`.
+- Detail extraction failures skip only the current candidate and are recorded in the live Run Ledger under `pipeline_runs/<run_id>/`.
 - Greetings are validated before send; wrong identity, recruiter/headhunter claims, unsupported claims, unrelated companies, excessive length, and spammy wording are blocked or rewritten once.
 - Contacted jobs are persisted in `.job-contact-state.json` by job ID, URL, company/title, status, and timestamp.
 - Already-contacted states such as `继续沟通` and `已发送` skip sending.

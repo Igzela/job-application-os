@@ -28,12 +28,14 @@ from jobos.submitter import (
     _find_boss_tab,
     _human_delay,
     _load_pack_files,
-    auto_submit_single,
     auto_submit_batch,
+    auto_submit_single,
+    auto_submit_workspace_job,
     _click_chat_button,
     _fill_greeting,
     _click_send,
 )
+from jobos.application_pack import write_pack_manifest
 
 
 # ---------------------------------------------------------------------------
@@ -47,7 +49,15 @@ def _make_state_file(base: Path, jobs: dict) -> Path:
     return state_path
 
 
-def _make_pack_dir(base: Path, job_id: str, files: dict | None = None) -> Path:
+def _make_pack_dir(
+    base: Path,
+    job_id: str,
+    files: dict | None = None,
+    *,
+    manifest: bool = True,
+    sources: bool = False,
+    validation: dict | None = None,
+) -> Path:
     """Create a fake application pack directory with given files."""
     app_dir = base / "applications" / job_id
     app_dir.mkdir(parents=True, exist_ok=True)
@@ -58,6 +68,23 @@ def _make_pack_dir(base: Path, job_id: str, files: dict | None = None) -> Path:
         }
     for name, content in files.items():
         (app_dir / name).write_text(content, encoding="utf-8")
+    if manifest:
+        source_map = None
+        if sources:
+            source_path = base / "jobs" / "normalized" / f"{job_id}.yaml"
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_text("title: Engineer\n", encoding="utf-8")
+            source_map = {"job": source_path}
+        write_pack_manifest(
+            app_dir,
+            job_id=job_id,
+            files=files,
+            created_at="2026-06-20T00:00:00+00:00",
+            sources=source_map,
+            validation=validation
+            if validation is not None
+            else {"supported": 1, "weak": 0, "unsupported": 0},
+        )
     return app_dir
 
 
@@ -211,6 +238,45 @@ class TestAutoSubmitSingle:
         assert attempt["started_at"]
         assert attempt["finished_at"]
 
+    @patch("jobos.submitter.auto_submit_single")
+    @patch("jobos.submitter._connect_browser")
+    def test_workspace_job_loads_state_pack_and_closes_browser(
+        self,
+        mock_connect,
+        mock_single,
+        tmp_path: Path,
+    ) -> None:
+        _make_state_file(tmp_path, {
+            "j-workspace": {
+                "status": "validated",
+                "validation": {"supported": 1, "weak": 0, "unsupported": 0},
+                "title": "Engineer",
+                "company": "Acme",
+                "link": "https://www.zhipin.com/web/geek/job_detail/j.html",
+            },
+        })
+        _make_pack_dir(tmp_path, "j-workspace", {"greeting.md": "Hi there"})
+        pw = MagicMock()
+        browser = MagicMock()
+        context = MagicMock()
+        page = _mock_page()
+        mock_connect.return_value = (pw, browser, context, page)
+        mock_single.return_value = SubmitResult(
+            job_id="j-workspace",
+            platform="boss",
+            dry_run=True,
+            fields_filled={"招呼语": "Hi there"},
+        )
+
+        result = auto_submit_workspace_job(str(tmp_path), "j-workspace", dry_run=True)
+
+        assert result.job_id == "j-workspace"
+        kwargs = mock_single.call_args.kwargs
+        assert kwargs["job_data"]["job_id"] == "j-workspace"
+        assert kwargs["pack_files"]["greeting.md"] == "Hi there"
+        browser.close.assert_called_once()
+        pw.stop.assert_called_once()
+
     def test_dry_run_succeeds_with_valid_job(self, tmp_path: Path) -> None:
         page = _mock_page()
         job_data = {
@@ -279,7 +345,7 @@ class TestAutoSubmitSingle:
         attempt = json.loads(Path(result.attempt_path).read_text(encoding="utf-8"))
         assert attempt["page_state"] == "normal"
         assert attempt["extractor"] in {"scrapling", "beautifulsoup"}
-        assert attempt["page_diagnostics"][0]["phase"] == "after_navigation"
+        assert attempt["page_diagnostics"][0]["phase"] == "pre_submit"
         assert attempt["page_diagnostics"][0]["classification"]["state"] == "normal"
 
     def test_dry_run_does_not_click_send(self, tmp_path: Path) -> None:
@@ -302,8 +368,11 @@ class TestAutoSubmitSingle:
 
     def test_confirm_mode_sets_submitted(self, tmp_path: Path) -> None:
         page = _mock_page()
+        page.content.return_value = "<html><body>已发送 Interested! Delta</body></html>"
         job_data = {
             "job_id": "j4",
+            "status": "validated",
+            "validation": {"supported": 1, "weak": 0, "unsupported": 0},
             "title": "DevOps",
             "company": "Delta",
             "link": "https://www.zhipin.com/web/geek/job_detail/j4.html",
@@ -319,11 +388,15 @@ class TestAutoSubmitSingle:
         # With mock returning True for is_visible, send should succeed
         assert result.submitted is True
         assert result.submitted_at is not None
+        attempt = json.loads(Path(result.attempt_path).read_text(encoding="utf-8"))
+        assert "sent_state" in attempt["result"]["success_signals"]
 
     def test_fields_filled_contains_greeting(self, tmp_path: Path) -> None:
         page = _mock_page()
         job_data = {
             "job_id": "j5",
+            "status": "validated",
+            "validation": {"supported": 1, "weak": 0, "unsupported": 0},
             "title": "SRE",
             "company": "Epsilon",
             "link": "https://www.zhipin.com/web/geek/job_detail/j5.html",
@@ -338,6 +411,159 @@ class TestAutoSubmitSingle:
         )
         assert "招呼语" in result.fields_filled
         assert result.fields_filled["招呼语"] == "My custom greeting"
+
+    @patch("jobos.submitter._connect_browser")
+    def test_workspace_live_submit_rejects_unvalidated_job_before_browser(
+        self,
+        mock_connect,
+        tmp_path: Path,
+    ) -> None:
+        _make_state_file(
+            tmp_path,
+            {
+                "j-unvalidated": {
+                    "status": "packed",
+                    "title": "Engineer",
+                    "company": "Acme",
+                    "link": "https://www.zhipin.com/web/geek/job_detail/j.html",
+                },
+            },
+        )
+        _make_pack_dir(tmp_path, "j-unvalidated", sources=True)
+
+        with pytest.raises(ValueError, match="validated"):
+            auto_submit_workspace_job(
+                str(tmp_path),
+                "j-unvalidated",
+                dry_run=False,
+                confirm=True,
+            )
+
+        mock_connect.assert_not_called()
+
+    @patch("jobos.submitter._connect_browser")
+    def test_workspace_submit_rejects_missing_url_before_browser(
+        self,
+        mock_connect,
+        tmp_path: Path,
+    ) -> None:
+        _make_state_file(
+            tmp_path,
+            {
+                "j-no-url": {
+                    "status": "validated",
+                    "validation": {"supported": 1, "weak": 0, "unsupported": 0},
+                    "title": "Engineer",
+                    "company": "Acme",
+                },
+            },
+        )
+        _make_pack_dir(tmp_path, "j-no-url", sources=True)
+
+        with pytest.raises(ValueError, match="job URL"):
+            auto_submit_workspace_job(
+                str(tmp_path),
+                "j-no-url",
+                dry_run=False,
+                confirm=True,
+            )
+
+        mock_connect.assert_not_called()
+
+    @patch("jobos.submitter._connect_browser")
+    def test_workspace_live_submit_requires_pack_sources_before_browser(
+        self,
+        mock_connect,
+        tmp_path: Path,
+    ) -> None:
+        _make_state_file(
+            tmp_path,
+            {
+                "j-no-sources": {
+                    "status": "validated",
+                    "validation": {"supported": 1, "weak": 0, "unsupported": 0},
+                    "title": "Engineer",
+                    "company": "Acme",
+                    "link": "https://www.zhipin.com/web/geek/job_detail/j.html",
+                },
+            },
+        )
+        _make_pack_dir(tmp_path, "j-no-sources")
+
+        with pytest.raises(ValueError, match="source records"):
+            auto_submit_workspace_job(
+                str(tmp_path),
+                "j-no-sources",
+                dry_run=False,
+                confirm=True,
+            )
+
+        mock_connect.assert_not_called()
+
+    @patch("jobos.submitter._connect_browser")
+    def test_workspace_live_submit_requires_pack_manifest_before_browser(
+        self,
+        mock_connect,
+        tmp_path: Path,
+    ) -> None:
+        _make_state_file(
+            tmp_path,
+            {
+                "j-no-manifest": {
+                    "status": "validated",
+                    "validation": {"supported": 1, "weak": 0, "unsupported": 0},
+                    "title": "Engineer",
+                    "company": "Acme",
+                    "link": "https://www.zhipin.com/web/geek/job_detail/j.html",
+                },
+            },
+        )
+        _make_pack_dir(tmp_path, "j-no-manifest", manifest=False)
+
+        with pytest.raises(ValueError, match="manifest"):
+            auto_submit_workspace_job(
+                str(tmp_path),
+                "j-no-manifest",
+                dry_run=False,
+                confirm=True,
+            )
+
+        mock_connect.assert_not_called()
+
+    @patch("jobos.submitter._connect_browser")
+    def test_workspace_live_submit_rejects_manifest_unsupported_claims(
+        self,
+        mock_connect,
+        tmp_path: Path,
+    ) -> None:
+        _make_state_file(
+            tmp_path,
+            {
+                "j-manifest-unsupported": {
+                    "status": "validated",
+                    "validation": {"supported": 1, "weak": 0, "unsupported": 0},
+                    "title": "Engineer",
+                    "company": "Acme",
+                    "link": "https://www.zhipin.com/web/geek/job_detail/j.html",
+                },
+            },
+        )
+        _make_pack_dir(
+            tmp_path,
+            "j-manifest-unsupported",
+            sources=True,
+            validation={"supported": 0, "weak": 0, "unsupported": 2},
+        )
+
+        with pytest.raises(ValueError, match="Application Pack.*unsupported.*2"):
+            auto_submit_workspace_job(
+                str(tmp_path),
+                "j-manifest-unsupported",
+                dry_run=False,
+                confirm=True,
+            )
+
+        mock_connect.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -367,7 +593,8 @@ class TestAutoSubmitBatch:
         for i in range(5):
             jid = f"job-{i}"
             jobs[jid] = {
-                "status": "predicted",
+                "status": "validated",
+                "validation": {"supported": 1, "weak": 0, "unsupported": 0},
                 "title": f"Role {i}",
                 "company": "Co",
                 "link": f"https://www.zhipin.com/web/geek/job_detail/{jid}.html",
@@ -398,7 +625,8 @@ class TestAutoSubmitBatch:
     def test_batch_with_mocked_browser(self, mock_get_browser, tmp_path: Path) -> None:
         jobs = {
             "j-batch-1": {
-                "status": "packed",
+                "status": "validated",
+                "validation": {"supported": 1, "weak": 0, "unsupported": 0},
                 "title": "Eng",
                 "company": "Acme",
                 "link": "https://www.zhipin.com/web/geek/job_detail/j-batch-1.html",
@@ -431,7 +659,8 @@ class TestAutoSubmitBatch:
     def test_batch_missing_pack_counts_as_failure(self, mock_get_browser, tmp_path: Path) -> None:
         jobs = {
             "j-nopack": {
-                "status": "predicted",
+                "status": "validated",
+                "validation": {"supported": 1, "weak": 0, "unsupported": 0},
                 "title": "NoPack",
                 "company": "Co",
                 "link": "https://www.zhipin.com/web/geek/job_detail/j-nopack.html",
@@ -458,6 +687,35 @@ class TestAutoSubmitBatch:
         assert summary.total_attempted == 1
         assert summary.total_failed == 1
         assert any("No application pack" in e for e in summary.errors)
+
+    @patch("jobos.browser.get_browser")
+    def test_live_batch_skips_unvalidated_jobs_before_browser(
+        self,
+        mock_get_browser,
+        tmp_path: Path,
+    ) -> None:
+        _make_state_file(
+            tmp_path,
+            {
+                "j-packed": {
+                    "status": "packed",
+                    "title": "Eng",
+                    "company": "Acme",
+                    "link": "https://www.zhipin.com/web/geek/job_detail/j-packed.html",
+                },
+            },
+        )
+        _make_pack_dir(tmp_path, "j-packed")
+
+        summary = auto_submit_batch(
+            state_dir=str(tmp_path),
+            dry_run=False,
+            confirm=True,
+        )
+
+        assert summary.total_attempted == 0
+        assert any("validated" in error for error in summary.errors)
+        mock_get_browser.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

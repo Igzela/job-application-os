@@ -5,6 +5,25 @@ import json
 import sys
 from pathlib import Path
 
+from .workspace import (
+    APPLICATIONS_DIR,
+    JOBS_DIR,
+    JOBS_NORMALIZED_DIR,
+    JOBS_RAW_DIR,
+    PREDICTIONS_DIR,
+    RETROS_DIR,
+    application_dir,
+    initialize_workspace,
+    jobs_dir,
+    jobs_normalized_dir,
+    jobs_raw_dir,
+    load_state,
+    predictions_dir,
+    retros_dir,
+    save_state,
+    state_path as workspace_state_path,
+)
+
 
 def _get_root() -> Path:
     """Return project root (cwd)."""
@@ -72,6 +91,28 @@ def main():
     # job doctor
     subparsers.add_parser("doctor", help="Check workspace health")
 
+    # job browser-check
+    p_browser_check = subparsers.add_parser(
+        "browser-check",
+        help="Check BOSS browser connectivity and page readiness",
+    )
+    p_browser_check.add_argument(
+        "--port",
+        type=int,
+        default=9222,
+        help="Chrome CDP port (default: 9222)",
+    )
+    p_browser_check.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run isolated standalone browser headless",
+    )
+    p_browser_check.add_argument(
+        "--standalone-browser",
+        action="store_true",
+        help="Launch isolated standalone Chromium instead of connecting to CDP",
+    )
+
     # job demo-seed
     subparsers.add_parser("demo-seed", help="Create sample workspace with fixtures")
 
@@ -89,6 +130,15 @@ def main():
     p_loop_run.add_argument("--max-jobs", type=int, default=10, help="Maximum jobs to process")
     p_loop_run.add_argument("--output", help="Run directory (default: pipeline_runs/<run_id>/)")
     p_loop_run.add_argument("--resume", help="Resume an existing run directory")
+
+    # job runs
+    p_runs = subparsers.add_parser("runs", help="List recent pipeline runs")
+    p_runs.add_argument("--limit", type=int, default=10, help="Maximum runs to show")
+    p_runs.add_argument(
+        "--mode",
+        choices=["dry_run", "live"],
+        help="Filter by run mode",
+    )
 
     # job recommend
     p_rec = subparsers.add_parser("recommend", help="Rank scored jobs")
@@ -135,6 +185,11 @@ def main():
     p_submit_cmd.add_argument("--confirm", action="store_true", help="Enable real submission (default is dry-run)")
     p_submit_cmd.add_argument("--port", type=int, default=9222, help="CDP port (default: 9222)")
     p_submit_cmd.add_argument("--headless", action="store_true", help="Run browser headless (standalone fallback only)")
+    p_submit_cmd.add_argument(
+        "--standalone-browser",
+        action="store_true",
+        help="Launch isolated standalone Chromium instead of connecting to CDP",
+    )
 
     # job auto-submit
     p_auto = subparsers.add_parser("auto-submit", help="Auto-submit to BOSS Zhipin")
@@ -143,6 +198,11 @@ def main():
     p_auto.add_argument("--confirm", action="store_true", help="Actually send messages")
     p_auto.add_argument("--port", type=int, default=9222)
     p_auto.add_argument("--headless", action="store_true")
+    p_auto.add_argument(
+        "--standalone-browser",
+        action="store_true",
+        help="Launch isolated standalone Chromium instead of connecting to CDP",
+    )
     p_auto.add_argument("--max-jobs", type=int, default=5, help="Max jobs in batch mode")
     p_auto.add_argument("--interval-min", type=int, default=30, help="Min seconds between submissions")
     p_auto.add_argument("--interval-max", type=int, default=120, help="Max seconds between submissions")
@@ -235,10 +295,12 @@ def _dispatch(args):
         "status": _cmd_status,
         "bump-rubric": _cmd_bump_rubric,
         "doctor": _cmd_doctor,
+        "browser-check": _cmd_browser_check,
         "demo-seed": _cmd_demo_seed,
         "queue": _cmd_queue,
         "loop-plan": _cmd_loop_plan,
         "loop-run": _cmd_loop_run,
+        "runs": _cmd_runs,
         "recommend": _cmd_recommend,
         "paste": _cmd_paste,
         "validate-pack": _cmd_validate_pack,
@@ -272,46 +334,9 @@ def _dispatch(args):
 # ---------------------------------------------------------------------------
 
 def _cmd_init(args):
-    import shutil
-    from .status import update_status
-
     root = _get_root()
     print("Initializing Job Application OS...")
-
-    directories = [
-        "profile",
-        "jobs/raw",
-        "jobs/normalized",
-        "jobs/skipped",
-        "jobs/saved",
-        "predictions",
-        "applications",
-        "retros",
-        "rubrics",
-        "adapters/manual_paste",
-        "adapters/local_mock_form",
-        "adapters/boss_assist",
-        "tools",
-        "tests/fixtures",
-    ]
-    for d in directories:
-        (root / d).mkdir(parents=True, exist_ok=True)
-
-    templates = {
-        "PROFILE.md": "# User Profile\n\nFill in your profile in `profile/` directory.\n",
-        "RUBRIC.md": "# Job Scoring Rubric\n\nActive rubric: see `rubrics/` directory.\n",
-        "WORKFLOW.md": "# Workflow\n\n1. Import JD\n2. Score\n3. Predict\n4. Pack\n5. Submit (manual)\n6. Retro\n7. Bump rubric\n",
-        "STATUS.md": "# Status\n\nRun `job status` to update.\n",
-    }
-    for name, content in templates.items():
-        path = root / name
-        if not path.exists():
-            path.write_text(content)
-
-    state_path = root / ".job-state.json"
-    if not state_path.exists():
-        state = {"jobs": {}, "active_rubric": "v0_student_internship", "rubric_history": [], "opportunities": [], "active_opportunity": None, "lessons": []}
-        state_path.write_text(json.dumps(state, indent=2) + "\n")
+    initialize_workspace(root)
 
     print(f"Created directory structure at {root}")
     print("Done. Edit profile/ files and rubrics/ to get started.")
@@ -323,12 +348,11 @@ def _cmd_import(args):
     from .importer import import_job
 
     root = _get_root()
-    jobs_dir = root / "jobs" / "normalized"
+    jobs_dir = jobs_normalized_dir(root)
     data = import_job(args.file, str(jobs_dir))
 
     # Also update state
-    state_path = root / ".job-state.json"
-    state = json.loads(state_path.read_text()) if state_path.exists() else {"jobs": {}}
+    state = load_state(root)
     state["jobs"][data["job_id"]] = {
         "title": data["title"],
         "company": data["company"],
@@ -337,7 +361,7 @@ def _cmd_import(args):
         "captured_at": data.get("imported_at", ""),
         "source_file": data.get("source_file", ""),
     }
-    state_path.write_text(json.dumps(state, indent=2) + "\n")
+    save_state(root, state)
 
     print(f"Imported: {data['job_id']}")
     print(f"  Title: {data['title']}")
@@ -346,38 +370,16 @@ def _cmd_import(args):
 
 
 def _cmd_score(args):
-    from .scorer import score_job
-    from .profile_loader import load_profile, load_evidence_bank
+    from .scorer import score_workspace_job
 
     root = _get_root()
     job_id = args.job
 
-    # Load job data
-    job_path = root / "jobs" / "normalized" / f"{job_id}.yaml"
-    if not job_path.exists():
-        # Try JSON
-        job_path = root / "jobs" / "normalized" / f"{job_id}.json"
-    if not job_path.exists():
+    try:
+        scores = score_workspace_job(root, job_id)
+    except FileNotFoundError:
         print(f"Error: Job {job_id} not found in jobs/normalized/", file=sys.stderr)
         sys.exit(1)
-
-    import yaml
-    if job_path.suffix == ".yaml":
-        job_data = yaml.safe_load(job_path.read_text())
-    else:
-        job_data = json.loads(job_path.read_text())
-
-    profile = load_profile(str(root))
-    evidence = load_evidence_bank(str(root))
-
-    # Load rubric
-    rubric_path = root / "rubrics" / "v0_student_internship.md"
-    rubric = {"target_roles": profile.get("target_roles", [])}
-    if rubric_path.exists():
-        from .rubric_manager import load_rubric
-        rubric = load_rubric(str(rubric_path))
-
-    scores = score_job(job_data, profile, evidence, rubric)
 
     print(f"Scores for {job_id}:")
     for dim in ["fit", "evidence", "opportunity", "strategic", "friction", "risk"]:
@@ -386,153 +388,66 @@ def _cmd_score(args):
     if scores.get("skipped"):
         print(f"  SKIPPED: {scores['skip_reason']}")
 
-    # Update state
-    state_path = root / ".job-state.json"
-    state = json.loads(state_path.read_text())
-    if job_id in state["jobs"]:
-        state["jobs"][job_id]["status"] = "scored"
-        state["jobs"][job_id]["scores"] = {k: v for k, v in scores.items() if k not in ("skipped", "skip_reason")}
-        state_path.write_text(json.dumps(state, indent=2) + "\n")
-
 
 def _cmd_predict(args):
-    from .predictor import create_prediction, save_prediction, load_prediction
+    from .predictor import PredictionInputError, predict_workspace_job
 
     root = _get_root()
     job_id = args.job
 
-    # Load job data from state
-    state_path = root / ".job-state.json"
-    state = json.loads(state_path.read_text())
-    if job_id not in state["jobs"]:
-        print(f"Error: Job {job_id} not found. Import and score first.", file=sys.stderr)
-        sys.exit(1)
-
-    job_entry = state["jobs"][job_id]
-    scores = job_entry.get("scores", {})
-    if not scores or "final_score" not in scores:
-        print(f"Error: Job {job_id} not scored yet. Run `job score --job {job_id}` first.", file=sys.stderr)
-        sys.exit(1)
-
-    from .profile_loader import load_profile
-    profile = load_profile(str(root))
-
-    job_data = {"job_id": job_id, **job_entry}
-    prediction = create_prediction(job_data, scores, profile)
-
     try:
-        path = save_prediction(prediction, root / "predictions")
-        print(f"Prediction saved: {path}")
-        print(f"  Decision: {prediction.decision}")
-        print(f"  Final score: {prediction.final_score:.2f}")
-        print(f"  Confidence: {prediction.confidence:.0%}")
+        result = predict_workspace_job(root, job_id, new_version=args.new_version)
+    except PredictionInputError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
     except FileExistsError as e:
-        if args.new_version:
-            # Find next version
-            import glob
-            existing = glob.glob(str(root / "predictions" / f"{job_id}_v*.json"))
-            next_v = len(existing) + 1
-            # Create with incremented version
-            prediction_v2 = create_prediction(
-                {**job_data, "version": next_v}, scores, profile
-            )
-            path = save_prediction(prediction_v2, root / "predictions")
-            print(f"New prediction version saved: {path}")
-        else:
-            print(f"Error: {e}", file=sys.stderr)
-            print("Use --new-version to create a revised prediction.", file=sys.stderr)
-            sys.exit(1)
+        print(f"Error: {e}", file=sys.stderr)
+        print("Use --new-version to create a revised prediction.", file=sys.stderr)
+        sys.exit(1)
 
-    # Update state
-    state["jobs"][job_id]["status"] = "predicted"
-    state_path.write_text(json.dumps(state, indent=2) + "\n")
+    if result.created_new_version:
+        print(f"New prediction version saved: {result.path}")
+        return
+
+    print(f"Prediction saved: {result.path}")
+    print(f"  Decision: {result.prediction.decision}")
+    print(f"  Final score: {result.prediction.final_score:.2f}")
+    print(f"  Confidence: {result.prediction.confidence:.0%}")
 
 
 def _cmd_pack(args):
-    from .pack_generator import generate_pack, validate_pack
-    from .profile_loader import load_profile, load_evidence_bank
+    from .pack_generator import PackInputError, generate_workspace_pack
 
     root = _get_root()
     job_id = args.job
 
-    # Load job data
-    state_path = root / ".job-state.json"
-    state = json.loads(state_path.read_text())
-    if job_id not in state["jobs"]:
-        print(f"Error: Job {job_id} not found.", file=sys.stderr)
-        sys.exit(1)
-
-    job_entry = state["jobs"][job_id]
-
-    # Load normalized job data
-    import yaml
-    job_yaml = root / "jobs" / "normalized" / f"{job_id}.yaml"
-    if job_yaml.exists():
-        job_data = yaml.safe_load(job_yaml.read_text())
-    else:
-        job_data = {"job_id": job_id, **job_entry}
-
-    # Load prediction
-    from .predictor import load_prediction
     try:
-        prediction = load_prediction(job_id, root / "predictions")
-        pred_dict = prediction.to_dict()
-    except FileNotFoundError:
-        print(f"Error: No prediction for {job_id}. Run `job predict` first.", file=sys.stderr)
+        result = generate_workspace_pack(root, job_id)
+    except PackInputError as e:
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-
-    profile = load_profile(str(root))
-    evidence = load_evidence_bank(str(root))
-
-    pack = generate_pack(job_data, pred_dict, profile, evidence)
-    warnings = validate_pack(pack, evidence)
-
-    # Save pack files
-    pack_dir = root / "applications" / job_id
-    pack_dir.mkdir(parents=True, exist_ok=True)
-    for filename, content in pack.files.items():
-        (pack_dir / filename).write_text(content)
 
     print(f"Application pack saved to: applications/{job_id}/")
-    for f in pack.files:
+    for f in result.pack.files:
         print(f"  - {f}")
 
-    if warnings:
-        print(f"\nWarnings ({len(warnings)}):")
-        for w in warnings:
+    if result.warnings:
+        print(f"\nWarnings ({len(result.warnings)}):")
+        for w in result.warnings:
             print(f"  ! {w}")
-
-    # Update state
-    state["jobs"][job_id]["status"] = "packed"
-    state_path.write_text(json.dumps(state, indent=2) + "\n")
 
 
 def _cmd_dry_run(args):
-    from .dry_run import run_dry_run
-    from .models import ApplicationPack
+    from .dry_run import DryRunInputError, run_workspace_dry_run
 
     root = _get_root()
     job_id = args.job
 
-    # Load pack files
-    pack_dir = root / "applications" / job_id
-    if not pack_dir.exists():
-        print(f"Error: No application pack for {job_id}. Run `job pack` first.", file=sys.stderr)
+    try:
+        result = run_workspace_dry_run(root, job_id)
+    except DryRunInputError as e:
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-
-    files = {}
-    for f in pack_dir.iterdir():
-        if f.is_file():
-            files[f.name] = f.read_text()
-
-    pack = ApplicationPack(job_id=job_id, files=files)
-
-    # Find mock form
-    mock_form = root / "adapters" / "local_mock_form" / "application_form.html"
-    if not mock_form.exists():
-        mock_form = root / "tests" / "fixtures" / "mock_form.html"
-
-    result = run_dry_run(job_id, pack, str(mock_form))
 
     print(f"Dry-run for {job_id}:")
     print(f"  Fields filled: {len(result['fields_filled'])}")
@@ -635,10 +550,10 @@ def _cmd_bump_rubric(args):
 
     report = bump_rubric(
         new_rubric_path=new_rubric,
-        jobs_dir=str(root / "jobs"),
-        predictions_dir=str(root / "predictions"),
-        retros_dir=str(root / "retros"),
-        state_path=str(root / ".job-state.json"),
+        jobs_dir=str(jobs_dir(root)),
+        predictions_dir=str(predictions_dir(root)),
+        retros_dir=str(retros_dir(root)),
+        state_path=str(workspace_state_path(root)),
     )
 
     print(f"Rubric bump report:")
@@ -650,201 +565,66 @@ def _cmd_bump_rubric(args):
 
 
 def _cmd_doctor(args):
-    import sys
+    from .doctor import run_doctor
+
     root = _get_root()
-    checks = []
+    report = run_doctor(root)
 
-    # 1. Required directories
-    required_dirs = ["profile", "jobs", "predictions", "applications", "retros", "rubrics"]
-    for d in required_dirs:
-        ok = (root / d).is_dir()
-        checks.append((f"Directory {d}/", ok))
+    for check in report.checks:
+        mark = "✓" if check.ok else "!" if check.severity == "warning" else "✗"
+        detail = f": {check.detail}" if check.detail else ""
+        print(f"  {mark} {check.label}{detail}")
 
-    # 2. Profile files
-    for name in ("base.yaml", "skills.yaml", "availability.yaml"):
-        ok = (root / "profile" / name).exists()
-        checks.append((f"Profile file profile/{name}", ok))
-
-    # 3. Active rubric
-    state_path = root / ".job-state.json"
-    if state_path.exists():
-        state = json.loads(state_path.read_text())
-        active = state.get("active_rubric")
-        rubric_ok = active and (root / "rubrics" / f"{active}.md").exists()
-        checks.append((f"Active rubric ({active})", rubric_ok))
-    else:
-        checks.append(("Active rubric (no state file)", False))
-
-    # 4. Test fixtures
-    mock_ok = (root / "tests" / "fixtures" / "mock_form.html").exists() or \
-              (root / "adapters" / "local_mock_form" / "application_form.html").exists()
-    checks.append(("Mock form fixture", mock_ok))
-
-    # 5. Python version
-    py_ok = sys.version_info >= (3, 11)
-    checks.append((f"Python >= 3.11 (current: {sys.version.split()[0]})", py_ok))
-
-    # 6. No live adapter
-    checks.append(("No live-platform adapter enabled", True))
-
-    # Print results
-    all_ok = True
-    for label, ok in checks:
-        mark = "✓" if ok else "✗"
-        print(f"  {mark} {label}")
-        if not ok:
-            all_ok = False
-
-    if all_ok:
-        print("\nAll checks passed.")
+    if report.all_ok:
+        if any(not check.ok for check in report.checks):
+            print("\nAll blocking checks passed.")
+        else:
+            print("\nAll checks passed.")
     else:
         print("\nSome checks failed. Fix the issues above.")
         sys.exit(1)
 
 
+def _cmd_browser_check(args):
+    from .browser_check import check_boss_browser
+
+    cdp_port = None if args.standalone_browser else args.port
+    result = check_boss_browser(
+        _get_root(),
+        cdp_port=cdp_port,
+        headless=args.headless,
+    )
+
+    print("BOSS browser check:")
+    print(f"  State: {result.page_state}")
+    if result.page_title:
+        print(f"  Page title: {result.page_title}")
+    if result.page_url:
+        print(f"  Page URL: {result.page_url}")
+    if result.screenshot_path:
+        print(f"  Screenshot: {result.screenshot_path}")
+    if result.html_path:
+        print(f"  HTML: {result.html_path}")
+    if result.diagnostics_path:
+        print(f"  Diagnostics: {result.diagnostics_path}")
+    if result.recovery:
+        print(f"  Recovery: {result.recovery}")
+    if result.error:
+        print(f"  Error: {result.error}", file=sys.stderr)
+    if not result.ok:
+        sys.exit(1)
+
+
 def _cmd_demo_seed(args):
-    import shutil
+    from .demo_seed import seed_demo_workspace
+
     root = _get_root()
-
-    # Run init first
-    _cmd_init(args)
-
-    # Sample profile files
-    profile_dir = root / "profile"
-
-    (profile_dir / "base.yaml").write_text(
-        "name: Alex Chen\n"
-        "school: University of California, Berkeley\n"
-        "major: Computer Science\n"
-        "degree: Bachelor of Science\n"
-        'graduation_date: "2027-05-15"\n'
-        "location: Berkeley, CA\n"
-        "target_locations:\n"
-        "  - San Francisco, CA\n"
-        "  - Seattle, WA\n"
-        "  - New York, NY\n"
-        'availability_start: "2026-06-01"\n'
-        'availability_end: "2026-08-15"\n'
-        "days_per_week: 5\n"
-        "languages:\n"
-        "  - English\n"
-        "  - Mandarin\n"
-    )
-
-    (profile_dir / "skills.yaml").write_text(
-        "skills:\n"
-        "  programming_languages:\n"
-        "    - name: Python\n"
-        "      proficiency: advanced\n"
-        "    - name: JavaScript\n"
-        "      proficiency: advanced\n"
-        "  frameworks:\n"
-        "    - name: React\n"
-        "      proficiency: advanced\n"
-        "  domains:\n"
-        "    - name: Data Analysis\n"
-        "      proficiency: intermediate\n"
-        "      tools: [pandas, NumPy, SQL]\n"
-    )
-
-    (profile_dir / "education.yaml").write_text(
-        "education:\n"
-        "  - institution: UC Berkeley\n"
-        "    degree: B.S.\n"
-        "    major: Computer Science\n"
-        '    graduation_date: "2027-05"\n'
-        "    gpa: 3.8\n"
-    )
-
-    (profile_dir / "availability.yaml").write_text(
-        "internship_window:\n"
-        '  start: "2026-06-01"\n'
-        '  end: "2026-08-15"\n'
-        "weekly_capacity:\n"
-        "  days_per_week: 5\n"
-        "work_arrangement:\n"
-        "  open_to_remote: true\n"
-        "  open_to_hybrid: true\n"
-        "  preferred: hybrid\n"
-        "target_locations:\n"
-        "  - San Francisco, CA\n"
-        "  - Seattle, WA\n"
-    )
-
-    (profile_dir / "evidence_bank.md").write_text(
-        "# Evidence Bank\n\n"
-        "## Project 1: Chrome Extension\n\n"
-        "**Type:** Full-stack\n"
-        "**Tech:** Vue 3, JavaScript, Chrome Extension API\n\n"
-        "- Built a Chrome extension from scratch with popup UI and content scripts\n"
-        "- Integrated REST API for real-time data exchange\n\n"
-        "## Project 2: Data Analysis Dashboard\n\n"
-        "**Type:** Data visualization\n"
-        "**Tech:** Python, pandas, matplotlib, SQL\n\n"
-        "- Analyzed 100K+ record datasets using pandas\n"
-        "- Created interactive visualizations with matplotlib\n"
-    )
-
-    # Sample rubric
-    rubrics_dir = root / "rubrics"
-    rubrics_dir.mkdir(exist_ok=True)
-    (rubrics_dir / "v0_student_internship.md").write_text(
-        "# Rubric v0: Student Internship\n\n"
-        "## Scoring Formula\n\n"
-        "final_score = 0.30*fit + 0.25*evidence + 0.20*opportunity + 0.15*strategic - 0.10*friction - 0.20*risk\n\n"
-        "## Dimensions\n\n"
-        "### 1. Skill Match (weight: 30%)\n"
-        "### 2. Evidence (weight: 25%)\n"
-        "### 3. Opportunity (weight: 20%)\n"
-        "### 4. Strategic (weight: 15%)\n"
-        "### 5. Friction (weight: 10%)\n"
-        "### 6. Risk (weight: 20%)\n"
-    )
-
-    # Sample JD
-    raw_dir = root / "jobs" / "raw"
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    (raw_dir / "sample_swe_intern.md").write_text(
-        "# Software Engineer Intern — Summer 2026\n\n"
-        "Company: Acme Labs\n"
-        "Location: San Francisco, CA (Hybrid)\n\n"
-        "Requirements:\n"
-        "- Python or JavaScript\n"
-        "- React or similar frontend framework\n"
-        "- SQL basics\n\n"
-        "Nice to have:\n"
-        "- Machine learning experience\n"
-        "- Previous internship\n"
-    )
-
-    # Mock form
-    mock_dir = root / "adapters" / "local_mock_form"
-    mock_dir.mkdir(parents=True, exist_ok=True)
-    (mock_dir / "application_form.html").write_text(
-        '<!DOCTYPE html><html><body>'
-        '<form action="/submit" method="POST">'
-        '<input name="full_name" type="text">'
-        '<input name="email" type="email">'
-        '<input name="phone" type="tel">'
-        '<input name="school" type="text">'
-        '<input name="major" type="text">'
-        '<textarea name="cover_letter"></textarea>'
-        '<select name="availability"><option value="summer">Summer</option></select>'
-        '<button type="submit">Submit</button>'
-        '</form></body></html>'
-    )
-
-    # Update state with rubric
-    state_path = root / ".job-state.json"
-    if state_path.exists():
-        state = json.loads(state_path.read_text())
-        state["active_rubric"] = "v0_student_internship"
-        state_path.write_text(json.dumps(state, indent=2) + "\n")
+    result = seed_demo_workspace(root)
 
     print("Demo workspace created!")
-    print(f"  Profile: {profile_dir}")
-    print(f"  Rubric: {rubrics_dir / 'v0_student_internship.md'}")
-    print(f"  Sample JD: {raw_dir / 'sample_swe_intern.md'}")
+    print(f"  Profile: {result.profile_dir}")
+    print(f"  Rubric: {result.rubric_path}")
+    print(f"  Sample JD: {result.sample_jd_path}")
     print()
     print("Next steps:")
     print(f"  job import --file jobs/raw/sample_swe_intern.md")
@@ -924,6 +704,25 @@ def _cmd_loop_run(args):
     print(f"  Retried: {summary['counts']['retried']}")
 
 
+def _cmd_runs(args):
+    from .run_ledger import list_run_ledgers
+
+    runs = list_run_ledgers(
+        _get_root(),
+        limit=args.limit,
+        mode=args.mode,
+    )
+    if not runs:
+        print("No pipeline runs found.")
+        return
+
+    for run in runs:
+        counts = f"{run.succeeded} succeeded, {run.failed} failed"
+        print(f"{run.run_id}  {run.mode}  {run.status}  {counts}")
+        if run.error:
+            print(f"  Error: {run.error}")
+
+
 def _cmd_recommend(args):
     from .recommend import recommend_jobs
 
@@ -944,7 +743,7 @@ def _cmd_recommend(args):
 
 
 def _cmd_paste(args):
-    from .importer import import_job
+    from .importer import import_pasted_job
 
     root = _get_root()
 
@@ -954,68 +753,27 @@ def _cmd_paste(args):
         print("Error: No input received on stdin.", file=sys.stderr)
         sys.exit(1)
 
-    # Write to temp file and import
-    import tempfile
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, dir=str(root)) as f:
-        f.write(jd_text)
-        tmp_path = f.name
+    data = import_pasted_job(root, jd_text)
 
-    try:
-        data = import_job(tmp_path, str(root / "jobs" / "normalized"))
-
-        # Update state
-        state_path = root / ".job-state.json"
-        state = json.loads(state_path.read_text()) if state_path.exists() else {"jobs": {}}
-        state["jobs"][data["job_id"]] = {
-            "title": data["title"],
-            "company": data["company"],
-            "location": data.get("location", ""),
-            "status": "imported",
-            "captured_at": data.get("imported_at", ""),
-            "source_file": "stdin",
-        }
-        state_path.write_text(json.dumps(state, indent=2) + "\n")
-
-        print(f"Imported from stdin: {data['job_id']}")
-        print(f"  Title: {data['title']}")
-        print(f"  Company: {data['company']}")
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
+    print(f"Imported from stdin: {data['job_id']}")
+    print(f"  Title: {data['title']}")
+    print(f"  Company: {data['company']}")
 
 
 def _cmd_validate_pack(args):
-    from .evidence_markers import generate_evidence_report
-    from .profile_loader import load_evidence_bank
+    from .evidence_markers import (
+        EvidenceReportInputError,
+        generate_workspace_evidence_report,
+    )
 
     root = _get_root()
     job_id = args.job
 
-    # Load pack files
-    pack_dir = root / "applications" / job_id
-    if not pack_dir.exists():
-        print(f"Error: No application pack for {job_id}. Run `job pack` first.", file=sys.stderr)
+    try:
+        report = generate_workspace_evidence_report(root, job_id)
+    except EvidenceReportInputError as e:
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-
-    pack_files = {}
-    for f in pack_dir.iterdir():
-        if f.is_file():
-            pack_files[f.name] = f.read_text()
-
-    evidence = load_evidence_bank(str(root))
-
-    # Load job data for required skills
-    state_path = root / ".job-state.json"
-    state = json.loads(state_path.read_text()) if state_path.exists() else {"jobs": {}}
-    job_entry = state.get("jobs", {}).get(job_id, {})
-
-    import yaml
-    job_yaml = root / "jobs" / "normalized" / f"{job_id}.yaml"
-    if job_yaml.exists():
-        job_data = yaml.safe_load(job_yaml.read_text())
-    else:
-        job_data = job_entry
-
-    report = generate_evidence_report(pack_files, evidence, job_data)
 
     print(f"Evidence validation for {job_id}:\n")
 
@@ -1033,6 +791,8 @@ def _cmd_validate_pack(args):
 
     print(f"\n  Missing JD skills: {report['missing_jd_skills']}")
     print(f"  Overclaim risk: {report['overclaim_risk']:.0%}")
+    if report.get("report_path"):
+        print(f"  Report: {report['report_path']}")
 
     if report["unsupported"]:
         print("\nWarning: Some claims lack evidence support. Review before submission.")
@@ -1054,9 +814,11 @@ def _cmd_report(args):
 
 
 def _cmd_scam_check(args):
-    from .scam_checker import check_opportunity
+    from .opportunity_workflows import record_scam_check
 
-    verdict = check_opportunity(args.name, args.description)
+    root = _get_root()
+    result = record_scam_check(root, args.name, args.description)
+    verdict = result.verdict
 
     print(f"Scam check: {verdict.name}")
     print(f"  Verdict: {verdict.verdict}")
@@ -1066,37 +828,17 @@ def _cmd_scam_check(args):
     print(f"  Verify first step: {verdict.verify_first_step}")
     print(f"  Income expectation: {verdict.income_expectation}")
 
-    if verdict.verdict in ("feasible", "suspect"):
-        root = _get_root()
-        state_path = root / ".job-state.json"
-        state = json.loads(state_path.read_text()) if state_path.exists() else {"jobs": {}, "opportunities": []}
-        opportunities = state.get("opportunities", [])
-        opp = {
-            "name": verdict.name,
-            "verdict": verdict.verdict,
-            "red_flags": verdict.red_flags,
-            "suspect_flags": verdict.suspect_flags,
-            "reason": verdict.reason,
-            "verify_first_step": verdict.verify_first_step,
-            "income_expectation": verdict.income_expectation,
-            "checked_at": verdict.checked_at,
-            "status": "candidate",
-        }
-        opportunities.append(opp)
-        state["opportunities"] = opportunities
-        state_path.write_text(json.dumps(state, indent=2) + "\n")
+    if result.written:
         print(f"\n  Written to .job-state.json opportunities[]")
 
 
 def _cmd_find(args):
-    from .opportunity_finder import find_opportunities
-    from .profile_loader import load_profile
+    from .opportunity_workflows import find_workspace_opportunities
 
     root = _get_root()
-    profile = load_profile(str(root))
-
     direction = args.direction if args.direction else None
-    opportunities = find_opportunities(profile, direction)
+    result = find_workspace_opportunities(root, direction)
+    opportunities = result.opportunities
 
     if not opportunities:
         print("No opportunities found for your profile.")
@@ -1110,45 +852,30 @@ def _cmd_find(args):
         print(f"     Income: {opp.income_expectation}")
         print()
 
-    # Write to state
-    state_path = root / ".job-state.json"
-    state = json.loads(state_path.read_text()) if state_path.exists() else {"jobs": {}, "opportunities": []}
-    existing = state.get("opportunities", [])
-    for opp in opportunities:
-        existing.append(opp.to_dict())
-    state["opportunities"] = existing
-    state_path.write_text(json.dumps(state, indent=2) + "\n")
-    print(f"Written {len(opportunities)} opportunities to .job-state.json")
+    print(f"Written {result.written} opportunities to .job-state.json")
 
 
 def _cmd_plan(args):
-    from .action_planner import create_plan
-    from .profile_loader import load_profile
+    from .opportunity_workflows import (
+        OpportunityNotFoundError,
+        OpportunityWorkflowError,
+        plan_workspace_opportunity,
+    )
 
     root = _get_root()
-    state_path = root / ".job-state.json"
-    if not state_path.exists():
-        print("Error: No .job-state.json found. Run init first.", file=sys.stderr)
-        sys.exit(1)
-
-    state = json.loads(state_path.read_text())
-    opportunities = state.get("opportunities", [])
-
-    target = None
-    for opp in opportunities:
-        if opp.get("name") == args.opportunity:
-            target = opp
-            break
-
-    if target is None:
-        print(f"Error: Opportunity '{args.opportunity}' not found in .job-state.json", file=sys.stderr)
+    try:
+        result = plan_workspace_opportunity(root, args.opportunity)
+    except OpportunityNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
         print("Available opportunities:", file=sys.stderr)
-        for opp in opportunities:
-            print(f"  - {opp.get('name', '?')}", file=sys.stderr)
+        for name in e.available:
+            print(f"  - {name}", file=sys.stderr)
+        sys.exit(1)
+    except OpportunityWorkflowError as e:
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    profile = load_profile(str(root))
-    plan = create_plan(target, profile)
+    plan = result.plan
 
     print(f"Action Plan for: {plan.opportunity_name}")
     print(f"\n1. Verification First Step:")
@@ -1169,9 +896,6 @@ def _cmd_plan(args):
         for w in plan.warnings:
             print(f"   ! {w}")
 
-    # Write plan to state
-    state["active_opportunity"] = plan.to_dict()
-    state_path.write_text(json.dumps(state, indent=2) + "\n")
     print(f"\nPlan written to .job-state.json active_opportunity")
 
 
@@ -1182,6 +906,7 @@ def _cmd_submit(args):
     job_id = args.job
     platform = args.platform
     dry_run = not args.confirm
+    cdp_port = None if args.standalone_browser else args.port
 
     try:
         result = submit_application(
@@ -1190,7 +915,7 @@ def _cmd_submit(args):
             state_dir=str(root),
             dry_run=dry_run,
             confirm=args.confirm,
-            cdp_port=args.port,
+            cdp_port=cdp_port,
             headless=args.headless,
         )
     except FileNotFoundError as e:
@@ -1215,54 +940,31 @@ def _cmd_submit(args):
         print(f"  Screenshot: {result.screenshot_path}")
     if result.error:
         print(f"  Error: {result.error}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _cmd_auto_submit(args):
-    from .submitter import auto_submit_single, auto_submit_batch, _load_pack_files, _connect_browser
+    from .submitter import auto_submit_batch, auto_submit_workspace_job
 
     root = _get_root()
     dry_run = not args.confirm
     mode = "DRY RUN" if dry_run else "LIVE"
+    cdp_port = None if args.standalone_browser else args.port
 
     if args.job:
-        # Single job mode
         job_id = args.job
-        state_path = root / ".job-state.json"
-        if not state_path.exists():
-            print("Error: No .job-state.json found. Run `job init` first.", file=sys.stderr)
-            sys.exit(1)
-
-        state = json.loads(state_path.read_text())
-        job_info = state.get("jobs", {}).get(job_id)
-        if not job_info:
-            print(f"Error: Job {job_id} not found in state.", file=sys.stderr)
-            sys.exit(1)
-
-        job_info["job_id"] = job_id
-        pack_files = _load_pack_files(root / "applications" / job_id)
-        if not pack_files:
-            print(f"Error: No application pack for {job_id}. Run `job pack` first.", file=sys.stderr)
-            sys.exit(1)
-
-        pw, browser, context, page = _connect_browser(args.port, args.headless)
         try:
-            result = auto_submit_single(
-                page=page,
-                job_data=job_info,
-                pack_files=pack_files,
+            result = auto_submit_workspace_job(
                 state_dir=str(root),
+                job_id=job_id,
+                cdp_port=cdp_port,
+                headless=args.headless,
                 dry_run=dry_run,
                 confirm=args.confirm,
             )
-        finally:
-            try:
-                browser.close()
-            except Exception:
-                pass
-            try:
-                pw.stop()
-            except Exception:
-                pass
+        except (FileNotFoundError, ValueError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
 
         print(f"Auto-submit [{mode}] for {job_id}:")
         print(f"  Submitted: {result.submitted}")
@@ -1280,7 +982,7 @@ def _cmd_auto_submit(args):
 
         summary = auto_submit_batch(
             state_dir=str(root),
-            cdp_port=args.port,
+            cdp_port=cdp_port,
             max_jobs=args.max_jobs,
             interval_min=args.interval_min,
             interval_max=args.interval_max,
@@ -1301,13 +1003,12 @@ def _cmd_auto_submit(args):
             print(f"\nErrors:", file=sys.stderr)
             for err in summary.errors:
                 print(f"  - {err}", file=sys.stderr)
+            sys.exit(1)
 
 
 def _cmd_boss_import(args):
-    from .boss_import import import_from_boss
+    from .boss_import import import_boss_jobs_to_workspace
     from .config import load_config
-    from datetime import datetime, timezone
-    import re as _re
 
     root = _get_root()
     keyword = args.keyword
@@ -1316,10 +1017,11 @@ def _cmd_boss_import(args):
     extraction_config = load_config().get("extraction", {})
 
     try:
-        jobs = import_from_boss(
-            keyword,
-            city_code,
-            port,
+        result = import_boss_jobs_to_workspace(
+            root,
+            keyword=keyword,
+            city_code=city_code,
+            port=port,
             use_scrapling=extraction_config.get("use_scrapling", True),
             record_diagnostics=extraction_config.get("record_diagnostics", True),
             include_html_snapshot=extraction_config.get("include_html_snapshot", True),
@@ -1338,50 +1040,12 @@ def _cmd_boss_import(args):
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    if not jobs:
+    if not result.jobs:
         print(f"No jobs found for keyword '{keyword}' (city={city_code}).")
         return
 
-    raw_dir = root / "jobs" / "raw"
-    raw_dir.mkdir(parents=True, exist_ok=True)
-
-    state_path = root / ".job-state.json"
-    state = json.loads(state_path.read_text()) if state_path.exists() else {"jobs": {}}
-
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-    imported = 0
-
-    for i, job in enumerate(jobs):
-        slug = _re.sub(r"[^a-z0-9]+", "-", job["title"].lower()).strip("-")[:40]
-        job_id = f"{ts}-boss-{i:03d}-{slug}"
-
-        # Write raw job data as JSON
-        raw_path = raw_dir / f"{job_id}.json"
-        raw_path.write_text(json.dumps(job, indent=2, ensure_ascii=False) + "\n")
-
-        # Register in state
-        state["jobs"][job_id] = {
-            "title": job["title"],
-            "company": job["company"],
-            "location": job.get("city_code", city_code),
-            "status": "imported",
-            "captured_at": job.get("imported_at", ""),
-            "source": "boss_zhipin",
-            "keyword": keyword,
-            "link": job.get("link", ""),
-        }
-        if job.get("extractor"):
-            state["jobs"][job_id]["extractor"] = job["extractor"]
-        if job.get("page_state"):
-            state["jobs"][job_id]["page_state"] = job["page_state"]
-        if job.get("extraction_diagnostics"):
-            state["jobs"][job_id]["extraction_diagnostics"] = job["extraction_diagnostics"]
-        imported += 1
-
-    state_path.write_text(json.dumps(state, indent=2) + "\n")
-
-    print(f"Imported {imported} jobs for keyword '{keyword}':")
-    for job in jobs:
+    print(f"Imported {result.imported} jobs for keyword '{keyword}':")
+    for job in result.jobs:
         print(f"  - {job['title']} @ {job['company']}  {job['salary']}")
     print(f"\nRaw files saved to: jobs/raw/")
     print(f"State updated: .job-state.json")
@@ -1452,46 +1116,26 @@ def _cmd_chat(args):
 
 
 def _cmd_analyze(args):
+    from .job_analysis import JobAnalysisInputError, analyze_workspace_job
     from .llm.provider import get_llm_adapter
-    from .llm.job_analyzer import analyze_match, explain_scores, check_scam
-    from .profile_loader import load_profile
-    import yaml
 
     root = _get_root()
     job_id = args.job
     config = _build_llm_config(args)
-
-    # Load job data
-    state_path = root / ".job-state.json"
-    if not state_path.exists():
-        print("Error: No .job-state.json found. Run `job init` first.", file=sys.stderr)
-        sys.exit(1)
-
-    state = json.loads(state_path.read_text())
-    job_entry = state.get("jobs", {}).get(job_id)
-    if not job_entry:
-        print(f"Error: Job {job_id} not found.", file=sys.stderr)
-        sys.exit(1)
-
-    # Try loading normalized job data
-    job_yaml = root / "jobs" / "normalized" / f"{job_id}.yaml"
-    job_json = root / "jobs" / "raw" / f"{job_id}.json"
-    if job_yaml.exists():
-        job_data = yaml.safe_load(job_yaml.read_text())
-    elif job_json.exists():
-        job_data = json.loads(job_json.read_text())
-    else:
-        job_data = {"job_id": job_id, **job_entry}
-
-    profile = load_profile(str(root))
     llm = get_llm_adapter(config)
+    try:
+        result = analyze_workspace_job(root, job_id, llm)
+    except JobAnalysisInputError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
+    job_data = result.job_data
     print(f"\n📊 分析职位: {job_data.get('title', job_id)}")
     print(f"   公司: {job_data.get('company', '未知')}\n")
 
     # Scam check
     print("🔒 反诈检查...")
-    scam = check_scam(llm, json.dumps(job_data, ensure_ascii=False))
+    scam = result.scam
     risk = scam.get("risk_level", "unknown")
     emoji = {"low": "✅", "medium": "⚠️", "high": "❌", "critical": "🚫"}.get(risk, "❓")
     print(f"   {emoji} 风险等级: {risk}")
@@ -1503,7 +1147,7 @@ def _cmd_analyze(args):
 
     # Match analysis
     print("📊 匹配度分析...")
-    match = analyze_match(llm, job_data, profile)
+    match = result.match
     print(f"   总分: {match.get('total_score', '?')}/100")
     print(f"   结论: {match.get('verdict', '未知')}")
     if match.get("breakdown"):
@@ -1518,8 +1162,7 @@ def _cmd_analyze(args):
 
     # Explanation
     print("💡 分析解读...")
-    explanation = explain_scores(llm, match, job_data, profile)
-    print(f"   {explanation}")
+    print(f"   {result.explanation}")
 
 
 def _cmd_tui(args):

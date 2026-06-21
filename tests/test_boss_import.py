@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from jobos.boss_import import import_from_boss
+from jobos.boss_import import import_boss_jobs_to_workspace, import_from_boss
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -182,6 +182,40 @@ class TestImportFromBoss:
 
         with pytest.raises(PermissionError, match="login required"):
             import_from_boss("AIGC", use_scrapling=False)
+
+
+class TestBossWorkspaceImport:
+    @patch("jobos.boss_import.import_from_boss")
+    def test_writes_raw_files_and_state(self, mock_import, tmp_path):
+        mock_import.return_value = [
+            {
+                "title": "AIGC Algorithm Engineer",
+                "company": "ByteDance",
+                "salary": "30-40K",
+                "tags": ["Python"],
+                "link": "https://www.zhipin.com/job_detail/123.html",
+                "city_code": "100010000",
+                "imported_at": "2026-06-17T00:00:00+00:00",
+                "extractor": "node_cdp",
+                "page_state": "normal",
+                "extraction_diagnostics": {"item_count": 1},
+            }
+        ]
+        (tmp_path / ".job-state.json").write_text(
+            json.dumps({"jobs": {}, "active_rubric": "v0"}) + "\n",
+            encoding="utf-8",
+        )
+
+        result = import_boss_jobs_to_workspace(tmp_path, "AIGC")
+
+        state = json.loads((tmp_path / ".job-state.json").read_text(encoding="utf-8"))
+        raw_files = list((tmp_path / "jobs" / "raw").glob("*boss*.json"))
+        assert result.imported == 1
+        assert len(raw_files) == 1
+        assert len(state["jobs"]) == 1
+        job = next(iter(state["jobs"].values()))
+        assert job["source"] == "boss_zhipin"
+        assert job["extractor"] == "node_cdp"
 
 
 class TestBossImportCLI:

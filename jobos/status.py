@@ -1,7 +1,6 @@
 """STATUS.md generator for the Job Application OS.
 
-Reads the state directory (containing .job-state.json and subdirectories
-for predictions, packs, etc.) and produces a human-readable STATUS.md
+Reads the workspace state and artifact directories to produce a human-readable STATUS.md
 summarizing pipeline health.
 
 Usage::
@@ -12,10 +11,11 @@ Usage::
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from .workspace import count_application_packs, count_predictions, load_state
 
 
 # Pipeline stages in order
@@ -27,10 +27,7 @@ STAGES = ["imported", "scored", "predicted", "packed", "submitted", "retro"]
 # ---------------------------------------------------------------------------
 
 def _load_state(state_dir: Path) -> Dict[str, Any]:
-    state_file = state_dir / ".job-state.json"
-    if not state_file.exists():
-        return {"jobs": {}, "active_rubric": "unknown", "rubric_history": []}
-    return json.loads(state_file.read_text(encoding="utf-8"))
+    return load_state(state_dir)
 
 
 def _classify_jobs(jobs: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
@@ -47,18 +44,12 @@ def _classify_jobs(jobs: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
 
 def _count_predictions(state_dir: Path) -> int:
     """Count prediction JSON files in predictions/ subdir."""
-    pred_dir = state_dir / "predictions"
-    if not pred_dir.is_dir():
-        return 0
-    return len(list(pred_dir.glob("*.json")))
+    return count_predictions(state_dir)
 
 
-def _count_packs(state_dir: Path) -> int:
-    """Count application pack files in packs/ subdir."""
-    pack_dir = state_dir / "packs"
-    if not pack_dir.is_dir():
-        return 0
-    return len(list(pack_dir.glob("*")))
+def _count_application_packs(state_dir: Path) -> int:
+    """Count application pack directories in applications/ subdir."""
+    return count_application_packs(state_dir)
 
 
 def _recent_activity(jobs: Dict[str, Any], limit: int = 5) -> List[Dict[str, str]]:
@@ -144,9 +135,9 @@ def _build_status_md(
     lines.append(_render_table(["Stage", "Count"], rows))
     lines.append("")
 
-    # -- Predictions & packs (filesystem counts) --
+    # -- Predictions & application packs (filesystem counts) --
     pred_count = _count_predictions(state_dir)
-    pack_count = _count_packs(state_dir)
+    pack_count = _count_application_packs(state_dir)
 
     # -- Opportunities --
     opportunities = state.get("opportunities", [])

@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from jobos.cli import _cmd_paste
+from jobos.importer import import_pasted_job
 
 
 class _Args:
@@ -67,3 +68,13 @@ class TestPaste:
         with pytest.raises(SystemExit) as exc:
             _cmd_paste(_Args())
         assert exc.value.code == 1
+
+    def test_import_pasted_job_workflow_updates_state(self, project_dir: Path):
+        jd_text = "# ML Intern\n\nCompany: ModelCo\nLocation: Remote\n"
+
+        data = import_pasted_job(project_dir, jd_text)
+
+        state = json.loads((project_dir / ".job-state.json").read_text())
+        assert data["job_id"] in state["jobs"]
+        assert state["jobs"][data["job_id"]]["source_file"] == "stdin"
+        assert (project_dir / "jobs" / "normalized" / f"{data['job_id']}.yaml").exists()

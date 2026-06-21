@@ -7,30 +7,48 @@ Supports two modes:
    screenshots, and optionally sends.
 
 2. **Batch submission** via ``auto_submit_batch`` -- iterates through jobs in
-   ``predicted`` or ``packed`` status, calling ``auto_submit_single`` for each
-   with random delays for anti-detection.
+   pipeline-approved submit candidate statuses, calling ``auto_submit_single``
+   for each with configured pacing.
 
 By default operates in dry-run mode: loads pack files, navigates to the target
 site, takes screenshots, and returns what *would* be submitted without
 clicking send.  Only when ``dry_run=False`` **and** ``confirm=True`` does the
 submitter actually click the send button.
 
-Anti-detection:
-- Random 2-5 s delay between UI actions (``_human_delay``).
-- Random 30-120 s delay between jobs in batch mode.
-- Patchright is used instead of vanilla Playwright (removes webdriver flag).
+Live mode remains explicit, rate-limited, and diagnosed.
 """
 
 from __future__ import annotations
 
-import json
-import random
 import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
+
+from .boss_adapter import (
+    click_chat_button,
+    click_send,
+    fill_greeting,
+    find_boss_tab,
+    human_delay,
+    open_boss_job_page,
+    submit_boss_application,
+    take_screenshot,
+)
+from .pipeline import (
+    SUBMIT_CANDIDATE_STATUSES,
+    assert_live_submission_ready,
+    is_submit_candidate_status,
+    transition_job,
+)
+from .workspace import (
+    application_dir,
+    load_state,
+    save_state,
+    state_path as workspace_state_path,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -48,34 +66,6 @@ BOSS_FIELD_MAP: Dict[str, str] = {
 PLATFORM_MAPS: Dict[str, Dict[str, str]] = {
     "boss": BOSS_FIELD_MAP,
 }
-
-# BOSS Zhipin selectors -- best-effort, may need updating if the site changes
-CHAT_BUTTON_SELECTORS = [
-    '.btn-startchat',
-    '[class*="startchat"]',
-    'button.btn-startchat',
-    'button:has-text("立即沟通")',
-    'button:has-text("沟通")',
-]
-GREETING_SELECTORS = [
-    '[contenteditable="true"]',
-    '.chat-input',
-    '.chat-editor textarea',
-    '[class*="chat"] textarea',
-    '.job-chat textarea',
-    'textarea[placeholder*="招呼"]',
-    'textarea[placeholder*="您好"]',
-    '#chat-input',
-]
-SEND_BUTTON_SELECTORS = [
-    '.send-message',
-    '[class*="send-message"]',
-    'button:has-text("发送")',
-    '.chat-editor button[class*="send"]',
-    '[class*="send-btn"]',
-    'button:has-text("发送")',
-]
-
 
 def get_platform_fields(platform: str) -> Dict[str, str]:
     """Return the pack-file -> form-field mapping for *platform*.
@@ -108,6 +98,7 @@ class SubmitResult:
     page_title: Optional[str] = None
     page_url: Optional[str] = None
     attempt_path: Optional[str] = None
+    success_signals: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -125,244 +116,41 @@ class BatchSummary:
 
 def _load_pack_files(app_dir: Path) -> Dict[str, str]:
     """Load all files from an application pack directory."""
-    files: Dict[str, str] = {}
     if not app_dir.is_dir():
-        return files
-    for p in app_dir.iterdir():
-        if p.is_file():
-            files[p.name] = p.read_text(encoding="utf-8")
-    return files
+        return {}
+    from .application_pack import load_application_pack
+
+    return load_application_pack(app_dir).files
 
 
-def _human_delay(min_sec: float = 2.0, max_sec: float = 5.0) -> float:
-    """Sleep a random duration between *min_sec* and *max_sec*.
+def _boss_dry_run_page_error(page) -> str | None:
+    """Return a browser-smoke error when BOSS did not load usable content."""
+    from .boss_parser import classify_boss_page
 
-    Returns the actual delay so callers can log or assert it.
-    """
-    delay = random.uniform(min_sec, max_sec)
-    time.sleep(delay)
-    return delay
-
-
-def _find_boss_tab(context) -> Optional[object]:
-    """Find an existing BOSS Zhipin tab in the browser *context*.
-
-    Searches all open pages for one whose URL contains ``zhipin.com``.
-    Returns the page object or ``None``.
-    """
-    for page in context.pages:
-        try:
-            url = page.url
-            if url and "zhipin.com" in url:
-                return page
-        except Exception:
-            continue
+    page_url = getattr(page, "url", "")
+    title_fn = getattr(page, "title", None)
+    page_title = title_fn() if callable(title_fn) else ""
+    html = page.content()
+    classification = classify_boss_page(html, url=page_url, title=page_title)
+    text_length = int(classification.signals.get("text_length") or 0)
+    if text_length == 0 and not page_title.strip():
+        return "BOSS page did not load visible content"
+    if classification.state in {
+        "access_limited",
+        "login_required",
+        "verification_required",
+    }:
+        return f"BOSS page blocked: {classification.state}: {classification.reason}"
     return None
 
 
-def _open_job_page(page, job_url: str) -> None:
-    """Navigate *page* to *job_url* and wait for network idle."""
-    page.goto(job_url, wait_until="domcontentloaded", timeout=30000)
-    # Extra wait for SPA to finish rendering
-    _human_delay(1.5, 3.0)
-
-
-def _click_chat_button(page) -> bool:
-    """Find and click the 'start chat' button on a BOSS job page.
-
-    Returns True if a button was found and clicked.
-    """
-    import sys
-
-    for selector in CHAT_BUTTON_SELECTORS:
-        try:
-            locator = page.locator(selector)
-            btn = locator.first
-            count = locator.count()
-            if isinstance(count, int) and count == 0:
-                print(f"   🔍 {selector}: count=0", file=sys.stderr)
-                continue
-
-            visible = btn.is_visible(timeout=3000)
-            print(f"   🔍 {selector}: count={count}, visible={visible}", file=sys.stderr)
-            if visible:
-                # 先滚动到按钮位置
-                btn.scroll_into_view_if_needed()
-                _human_delay(0.5, 1.0)
-                btn.click()
-                _human_delay()
-                return True
-        except Exception as e:
-            print(f"   ⚠️ {selector}: {str(e)[:50]}", file=sys.stderr)
-            continue
-    return False
-
-
-def _fill_greeting(page, greeting_text: str) -> bool:
-    """Find the chat greeting textarea and fill it with *greeting_text*.
-
-    Uses human-like typing simulation instead of instant fill.
-    Returns True if a textarea was found and filled.
-    """
-    for selector in GREETING_SELECTORS:
-        try:
-            textarea = page.locator(selector).first
-            if textarea.is_visible(timeout=5000):
-                textarea.click()
-                _human_delay(0.3, 0.8)
-
-                # 检查是否是 contenteditable 元素
-                is_contenteditable = textarea.evaluate("el => el.contentEditable === 'true'")
-
-                if is_contenteditable:
-                    # contenteditable 元素需要点击后用 keyboard.type
-                    textarea.click()
-                    _human_delay(0.3, 0.5)
-                    # 全选清空
-                    page.keyboard.press("Control+a")
-                    _human_delay(0.1, 0.2)
-                    page.keyboard.press("Backspace")
-                    _human_delay(0.2, 0.4)
-                    # 逐字输入
-                    for char in greeting_text:
-                        page.keyboard.type(char, delay=random.randint(30, 80))
-                        if random.random() < 0.03:
-                            _human_delay(0.2, 0.5)
-                else:
-                    # 普通 textarea 使用 fill
-                    textarea.fill(greeting_text)
-
-                _human_delay()
-                return True
-        except Exception:
-            continue
-    return False
-
-
-def _click_send(page) -> bool:
-    """Find and click the 'send' button in the chat window.
-
-    Returns True if a send button was found and clicked.
-    """
-    for selector in SEND_BUTTON_SELECTORS:
-        try:
-            btn = page.locator(selector).first
-            if btn.is_visible(timeout=3000):
-                btn.click()
-                _human_delay()
-                return True
-        except Exception:
-            continue
-    return False
-
-
-def _take_screenshot(page, path: Path) -> Optional[str]:
-    """Take a screenshot and return the path string, or None on failure."""
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        page.screenshot(path=str(path))
-        return str(path)
-    except Exception:
-        return None
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _classify_submit_error(error: Optional[str]) -> Optional[str]:
-    if not error:
-        return None
-    message = error.lower()
-    if "url" in message:
-        return "no_url"
-    if "chat" in message:
-        return "no_chat_button"
-    if "fill" in message or "textarea" in message:
-        return "fill_failed"
-    if "send" in message:
-        return "send_failed"
-    if "browser" in message or "cdp" in message:
-        return "browser_connect_failed"
-    return "submit_failed"
-
-
-def _write_submit_attempt(path: Path, record: Dict[str, Any]) -> str:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(record, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    return str(path)
-
-
-def _submit_attempt_path(state_dir: str, job_id: str) -> Path:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    return Path(state_dir) / "applications" / job_id / "submit_attempts" / f"{stamp}.json"
-
-
-def _result_to_attempt_update(result: SubmitResult) -> Dict[str, Any]:
-    return {
-        "finished_at": _utc_now(),
-        "status": "failed" if result.error else "succeeded",
-        "result": {
-            "submitted": result.submitted,
-            "submitted_at": result.submitted_at,
-            "fields_filled": result.fields_filled,
-            "page_title": result.page_title,
-            "page_url": result.page_url,
-            "screenshot_path": result.screenshot_path,
-        },
-        "error": result.error,
-        "error_class": _classify_submit_error(result.error),
-        "screenshot_paths": [result.screenshot_path] if result.screenshot_path else [],
-    }
-
-
-def _capture_page_diagnostics(page, phase: str) -> Dict[str, Any]:
-    """Classify the current browser page when HTML content is available."""
-    try:
-        content_fn = getattr(page, "content", None)
-        html = content_fn() if callable(content_fn) else ""
-    except Exception as exc:
-        return {"phase": phase, "error": f"content_unavailable: {exc}"}
-    if not isinstance(html, str) or not html.strip():
-        return {}
-
-    try:
-        from .boss_parser import classify_boss_page, parse_chat_page, scrapling_available
-
-        page_url = getattr(page, "url", "")
-        title_fn = getattr(page, "title", None)
-        page_title = title_fn() if callable(title_fn) else ""
-        classification = classify_boss_page(html, url=page_url, title=page_title)
-        chat = parse_chat_page(html)
-        return {
-            "phase": phase,
-            "extractor": "scrapling" if scrapling_available() else "beautifulsoup",
-            "page_state": classification.state,
-            "classification": classification.to_dict(),
-            "recovery": classification.recovery,
-            "chat_fields": chat,
-        }
-    except Exception as exc:
-        return {"phase": phase, "error": f"classification_failed: {exc}"}
-
-
-def _record_page_diagnostics(attempt_record: Dict[str, Any], page, phase: str) -> None:
-    diagnostics = _capture_page_diagnostics(page, phase)
-    if not diagnostics:
-        return
-    attempt_record.setdefault("page_diagnostics", []).append(diagnostics)
-    if diagnostics.get("page_state"):
-        attempt_record["page_state"] = diagnostics["page_state"]
-    if diagnostics.get("extractor"):
-        attempt_record["extractor"] = diagnostics["extractor"]
-    recovery = diagnostics.get("recovery")
-    if recovery:
-        signals = attempt_record.setdefault("recovery_signals", [])
-        if recovery not in signals:
-            signals.append(recovery)
+_human_delay = human_delay
+_find_boss_tab = find_boss_tab
+_open_job_page = open_boss_job_page
+_click_chat_button = click_chat_button
+_fill_greeting = fill_greeting
+_click_send = click_send
+_take_screenshot = take_screenshot
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +170,7 @@ def auto_submit_single(
     Parameters
     ----------
     page:
-        A Playwright/Patchright page object (already connected to a browser).
+        A Playwright page object (already connected to a browser).
     job_data:
         Dict with at least ``job_id``, ``title``, ``company``, and ``link``.
     pack_files:
@@ -399,134 +187,98 @@ def auto_submit_single(
     SubmitResult
     """
     job_id = job_data.get("job_id", "unknown")
-    job_url = job_data.get("link", "")
-    platform = "boss"
-    greeting_text = pack_files.get("greeting.md", "")
-    attempt_path = _submit_attempt_path(state_dir, job_id)
-    attempt_record: Dict[str, Any] = {
-        "schema_version": 1,
-        "job_id": job_id,
-        "url": job_url,
-        "platform": platform,
-        "mode": "dry_run" if dry_run else "live",
-        "started_at": _utc_now(),
-        "status": "started",
-        "result": None,
-        "error": None,
-        "error_class": None,
-        "screenshot_paths": [],
-        "page_state": None,
-        "extractor": None,
-        "page_diagnostics": [],
-        "recovery_signals": [],
-    }
-    _write_submit_attempt(attempt_path, attempt_record)
+    live = not dry_run and confirm
+    if live:
+        assert_live_submission_ready(job_data)
+    result = submit_boss_application(
+        page,
+        job_id=job_id,
+        job_url=job_data.get("url") or job_data.get("link", ""),
+        company=job_data.get("company", ""),
+        greeting=pack_files.get("greeting.md", ""),
+        state_dir=state_dir,
+        dry_run=dry_run,
+        confirm=confirm,
+        validated=live,
+    )
+    return SubmitResult(
+        job_id=result.job_id,
+        platform="boss",
+        dry_run=result.dry_run,
+        fields_filled=result.fields_filled,
+        screenshot_path=result.screenshot_path,
+        submitted=result.submitted,
+        submitted_at=result.submitted_at,
+        error=result.error,
+        page_title=result.page_title,
+        page_url=result.page_url,
+        attempt_path=result.attempt_path,
+        success_signals=result.success_signals,
+    )
 
-    if not job_url:
-        result = SubmitResult(
+
+def auto_submit_workspace_job(
+    state_dir: str,
+    job_id: str,
+    cdp_port: int | None = 9222,
+    headless: bool = False,
+    dry_run: bool = True,
+    confirm: bool = False,
+) -> SubmitResult:
+    """Load one workspace job and run BOSS auto-submit with browser cleanup."""
+    root = Path(state_dir)
+    if not workspace_state_path(root).exists():
+        raise FileNotFoundError("No .job-state.json found. Run `job init` first.")
+
+    state = load_state(root)
+    job_info = state.get("jobs", {}).get(job_id)
+    if not job_info:
+        raise ValueError(f"Job {job_id} not found in state.")
+    if not (job_info.get("url") or job_info.get("link")):
+        raise ValueError(f"Job {job_id} has no job URL.")
+    if not dry_run and confirm:
+        assert_live_submission_ready(job_info)
+
+    from .application_pack import (
+        load_application_pack,
+        load_live_application_pack,
+    )
+
+    if not dry_run and confirm:
+        pack_files = load_live_application_pack(
+            application_dir(root, job_id),
             job_id=job_id,
-            platform=platform,
-            dry_run=dry_run,
-            fields_filled=pack_files,
-            error="No job URL found in job data",
-            attempt_path=str(attempt_path),
+            expected_validation=job_info["validation"],
+        ).files
+    else:
+        pack_files = load_application_pack(
+            application_dir(root, job_id),
+            job_id=job_id,
+        ).files
+    if not pack_files:
+        raise FileNotFoundError(
+            f"No application pack for {job_id}. Run `job pack` first."
         )
-        attempt_record.update(_result_to_attempt_update(result))
-        _write_submit_attempt(attempt_path, attempt_record)
-        return result
 
-    fields_filled: Dict[str, str] = {}
-    screenshot_dir = Path(state_dir) / "applications" / job_id
-
+    pw, browser, _context, page = _connect_browser(cdp_port, headless)
     try:
-        # 1. Navigate to job page
-        _open_job_page(page, job_url)
-        _record_page_diagnostics(attempt_record, page, "after_navigation")
-
-        pre_screenshot = _take_screenshot(
-            page, screenshot_dir / "pre_submit_screenshot.png"
-        )
-
-        # 2. Click the "start chat" button
-        chat_clicked = _click_chat_button(page)
-        _record_page_diagnostics(attempt_record, page, "after_chat_click")
-        if not chat_clicked:
-            result = SubmitResult(
-                job_id=job_id,
-                platform=platform,
-                dry_run=dry_run,
-                fields_filled=fields_filled,
-                screenshot_path=pre_screenshot,
-                error="Could not find 'start chat' button on page",
-                page_title=page.title(),
-                page_url=page.url,
-                attempt_path=str(attempt_path),
-            )
-            attempt_record.update(_result_to_attempt_update(result))
-            _write_submit_attempt(attempt_path, attempt_record)
-            return result
-
-        _human_delay()
-
-        # 3. Fill greeting text
-        if greeting_text:
-            filled = _fill_greeting(page, greeting_text)
-            _record_page_diagnostics(attempt_record, page, "after_fill")
-            if filled:
-                fields_filled["招呼语"] = greeting_text
-            # If we can't find the textarea, that's OK -- we still screenshot
-
-        # 4. Pre-send screenshot
-        pre_send_screenshot = _take_screenshot(
-            page, screenshot_dir / "pre_send_screenshot.png"
-        )
-
-        # 5. Send if confirmed
-        submitted = False
-        submitted_at = None
-        if not dry_run and confirm:
-            sent = _click_send(page)
-            _record_page_diagnostics(attempt_record, page, "after_send")
-            if sent:
-                submitted = True
-                submitted_at = datetime.now(timezone.utc).isoformat()
-                _take_screenshot(
-                    page, screenshot_dir / "post_send_screenshot.png"
-                )
-
-        result = SubmitResult(
-            job_id=job_id,
-            platform=platform,
+        return auto_submit_single(
+            page=page,
+            job_data={"job_id": job_id, **job_info},
+            pack_files=pack_files,
+            state_dir=str(root),
             dry_run=dry_run,
-            fields_filled=fields_filled,
-            screenshot_path=pre_send_screenshot or pre_screenshot,
-            submitted=submitted,
-            submitted_at=submitted_at,
-            page_title=page.title(),
-            page_url=page.url,
-            attempt_path=str(attempt_path),
+            confirm=confirm,
         )
-        attempt_record.update(_result_to_attempt_update(result))
-        _write_submit_attempt(attempt_path, attempt_record)
-        return result
-
-    except Exception as e:
-        _record_page_diagnostics(attempt_record, page, "on_error")
-        error_screenshot = _take_screenshot(
-            page, screenshot_dir / "error_screenshot.png"
-        )
-        result = SubmitResult(
-            job_id=job_id,
-            platform=platform,
-            dry_run=dry_run,
-            fields_filled=fields_filled,
-            screenshot_path=error_screenshot,
-            error=str(e),
-            attempt_path=str(attempt_path),
-        )
-        attempt_record.update(_result_to_attempt_update(result))
-        _write_submit_attempt(attempt_path, attempt_record)
-        return result
+    finally:
+        try:
+            browser.close()
+        except Exception:
+            pass
+        try:
+            pw.stop()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -547,7 +299,7 @@ def auto_submit_batch(
     Loads ``.job-state.json``, finds jobs in ``predicted`` or ``packed``
     status, and calls :func:`auto_submit_single` for each.  Random delay
     between ``interval_min`` and ``interval_max`` seconds is applied between
-    submissions for anti-detection.
+    submissions for configured pacing.
 
     Parameters
     ----------
@@ -570,25 +322,47 @@ def auto_submit_batch(
     -------
     BatchSummary
     """
-    state_path = Path(state_dir) / ".job-state.json"
+    state_path = workspace_state_path(state_dir)
     if not state_path.exists():
         summary = BatchSummary()
         summary.errors.append("No .job-state.json found. Run `job init` first.")
         return summary
 
-    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state = load_state(state_dir)
     all_jobs = state.get("jobs", {})
 
-    # Filter to jobs that are ready for submission
+    summary = BatchSummary()
+    live = not dry_run and confirm
+
+    # Dry-run may inspect legacy candidates. Live mode requires clean validation.
     ready_jobs = []
     for job_id, job_info in all_jobs.items():
         status = job_info.get("status", "")
-        if status in ("predicted", "packed"):
-            ready_jobs.append({"job_id": job_id, **job_info})
+        if is_submit_candidate_status(status):
+            candidate = {"job_id": job_id, **job_info}
+            if live:
+                try:
+                    assert_live_submission_ready(job_info)
+                    from .application_pack import load_live_application_pack
+
+                    pack_files = load_live_application_pack(
+                        application_dir(state_dir, job_id),
+                        job_id=job_id,
+                        expected_validation=job_info["validation"],
+                    ).files
+                except ValueError as exc:
+                    summary.errors.append(f"{job_id}: {exc}")
+                    continue
+                if not pack_files:
+                    summary.errors.append(f"{job_id}: No application pack found")
+                    continue
+                candidate["_pack_files"] = pack_files
+            ready_jobs.append(candidate)
 
     if not ready_jobs:
-        summary = BatchSummary()
-        summary.errors.append("No jobs in 'predicted' or 'packed' status found.")
+        if not summary.errors:
+            expected = ", ".join(f"'{status}'" for status in SUBMIT_CANDIDATE_STATUSES)
+            summary.errors.append(f"No jobs in {expected} status found.")
         return summary
 
     # Limit to max_jobs
@@ -604,14 +378,20 @@ def auto_submit_batch(
         if boss_tab is not None:
             page = boss_tab
 
-        summary = BatchSummary()
-
         for i, job_info in enumerate(ready_jobs):
             job_id = job_info["job_id"]
 
             # Load pack files
-            app_dir = Path(state_dir) / "applications" / job_id
-            pack_files = _load_pack_files(app_dir)
+            pack_files = job_info.pop("_pack_files", None)
+            if pack_files is None:
+                app_dir = application_dir(state_dir, job_id)
+                from .application_pack import load_application_pack
+
+                pack_files = load_application_pack(
+                    app_dir,
+                    job_id=job_id,
+                    require_manifest=False,
+                ).files
 
             if not pack_files:
                 summary.total_attempted += 1
@@ -639,15 +419,13 @@ def auto_submit_batch(
 
                 # Update job status in state
                 if not dry_run and result.submitted:
-                    state["jobs"][job_id]["status"] = "submitted"
+                    transition_job(state["jobs"][job_id], "submitted")
                     state["jobs"][job_id]["submitted_at"] = result.submitted_at or ""
-                    state_path.write_text(
-                        json.dumps(state, indent=2, ensure_ascii=False) + "\n"
-                    )
+                    save_state(state_dir, state)
 
             # Random delay between jobs (skip after last job)
             if i < len(ready_jobs) - 1:
-                delay = random.uniform(interval_min, interval_max)
+                delay = max(0, interval_min)
                 print(
                     f"  Waiting {delay:.0f}s before next job...",
                     file=sys.stderr,
@@ -691,8 +469,7 @@ def prepare_submission(
     them to platform form fields.  Returns a :class:`SubmitResult` with
     ``dry_run=True`` and the fields that would be filled.
     """
-    state = Path(state_dir)
-    app_dir = state / "applications" / job_id
+    app_dir = application_dir(state_dir, job_id)
 
     if not app_dir.is_dir():
         raise FileNotFoundError(
@@ -742,17 +519,21 @@ def submit_application(
                 wait_until="domcontentloaded",
                 timeout=30000,
             )
-            time.sleep(3)
-            screenshot_dir = Path(state_dir) / "applications" / job_id
+            from .browser import wait_for_page_content
+
+            wait_for_page_content(page)
+            screenshot_dir = application_dir(state_dir, job_id)
             screenshot_dir.mkdir(parents=True, exist_ok=True)
             screenshot_path = str(screenshot_dir / "dry_run_screenshot.png")
             page.screenshot(path=screenshot_path)
+            page_error = _boss_dry_run_page_error(page)
             return SubmitResult(
                 job_id=job_id,
                 platform=platform,
                 dry_run=True,
                 fields_filled=result.fields_filled,
                 screenshot_path=screenshot_path,
+                error=page_error,
                 page_title=page.title(),
                 page_url=page.url,
             )
@@ -821,7 +602,7 @@ def submit_application(
             else:
                 fields_actually_filled[field_name] = content
 
-        screenshot_dir = Path(state_dir) / "applications" / job_id
+        screenshot_dir = application_dir(state_dir, job_id)
         screenshot_dir.mkdir(parents=True, exist_ok=True)
         screenshot_path = str(screenshot_dir / "submit_screenshot.png")
         page.screenshot(path=screenshot_path)

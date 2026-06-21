@@ -13,7 +13,12 @@ from unittest.mock import patch
 import pytest
 from bs4 import BeautifulSoup
 
-from jobos.dry_run import run_dry_run, _fill_form, _build_field_mapping
+from jobos.dry_run import (
+    _build_field_mapping,
+    _fill_form,
+    run_dry_run,
+    run_workspace_dry_run,
+)
 from jobos.models import ApplicationPack
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -185,6 +190,24 @@ class TestReturnStructure:
         result = run_dry_run("test-001", pack, mock_form_path=MOCK_FORM)
 
         assert "test-001" in result["log"]
+
+
+def test_run_workspace_dry_run_loads_pack_and_mock_form(tmp_path: Path) -> None:
+    job_id = "workspace-dry-run"
+    pack_dir = tmp_path / "applications" / job_id
+    pack_dir.mkdir(parents=True)
+    (pack_dir / "cover_letter.md").write_text("Workspace cover letter", encoding="utf-8")
+    form_dir = tmp_path / "tests" / "fixtures"
+    form_dir.mkdir(parents=True)
+    (form_dir / "mock_form.html").write_text(
+        '<form><input name="first_name" value=""><textarea name="cover_letter"></textarea></form>',
+        encoding="utf-8",
+    )
+
+    result = run_workspace_dry_run(tmp_path, job_id)
+
+    assert result["fields_filled"]["first_name"] == "Jordan"
+    assert result["fields_filled"]["cover_letter"] == "Workspace cover letter"
 
 
 # ---------------------------------------------------------------------------

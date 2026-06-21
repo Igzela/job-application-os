@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from jobos.application_pack import load_application_pack
 from jobos.cli import _cmd_loop_run
 from jobos.loop import run_loop
 
@@ -117,6 +118,64 @@ def test_loop_run_cli_prints_summary(tmp_path: Path, monkeypatch, capsys) -> Non
     out = capsys.readouterr().out
     assert "Loop run written:" in out
     assert "Succeeded: 1" in out
+
+
+def test_loop_pack_writes_source_verifiable_manifest(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from jobos.predictor import create_prediction, save_prediction
+
+    job_id = "job-pack"
+    _write_state(
+        tmp_path,
+        {
+            job_id: {
+                "status": "predicted",
+                "title": "Engineer",
+                "company": "Acme",
+            },
+        },
+    )
+    (tmp_path / "profile").mkdir()
+    (tmp_path / "profile" / "base.yaml").write_text("name: Test\n", encoding="utf-8")
+    (tmp_path / "profile" / "skills.yaml").write_text("skills: []\n", encoding="utf-8")
+    (tmp_path / "profile" / "availability.yaml").write_text(
+        "available: true\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "profile" / "evidence_bank.md").write_text(
+        "- Built Python tools\n",
+        encoding="utf-8",
+    )
+    job_yaml = tmp_path / "jobs" / "normalized" / f"{job_id}.yaml"
+    job_yaml.parent.mkdir(parents=True)
+    job_yaml.write_text(
+        "title: Engineer\ncompany: Acme\nskills_required: [Python]\n",
+        encoding="utf-8",
+    )
+    predictions_dir = tmp_path / "predictions"
+    predictions_dir.mkdir()
+    prediction = create_prediction(
+        {"job_id": job_id, "version": 1},
+        {"final_score": 8.0, "skill_match": 8.0},
+        {"evidence_items": ["Built Python tools"]},
+    )
+    save_prediction(prediction, predictions_dir)
+
+    summary = run_loop(
+        tmp_path,
+        dry_run=True,
+        output="pipeline_runs/source-pack",
+        max_jobs=1,
+    )
+
+    assert summary["counts"]["failed"] == 0
+    load_application_pack(
+        tmp_path / "applications" / job_id,
+        require_manifest=True,
+        verify_sources=True,
+    )
 
 
 def test_loop_run_records_extraction_diagnostics(tmp_path: Path, monkeypatch) -> None:

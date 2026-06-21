@@ -8,6 +8,7 @@ from jobos.predictor import (
     Prediction,
     create_prediction,
     load_prediction,
+    predict_workspace_job,
     save_prediction,
 )
 
@@ -158,3 +159,63 @@ class TestNewVersionCreatesV2:
         v1_data = json.loads(v1_file.read_text())
         assert v1_data["version"] == 1
         assert v1_loaded.version == 2
+
+
+def test_predict_workspace_job_writes_prediction_and_updates_state(tmp_path):
+    job_id = SAMPLE_JOB_DATA["job_id"]
+    (tmp_path / ".job-state.json").write_text(
+        json.dumps(
+            {
+                "jobs": {
+                    job_id: {
+                        "title": SAMPLE_JOB_DATA["role"],
+                        "company": SAMPLE_JOB_DATA["company"],
+                        "status": "scored",
+                        "scores": SAMPLE_SCORES,
+                    }
+                },
+                "active_rubric": SAMPLE_JOB_DATA["rubric_version"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = predict_workspace_job(tmp_path, job_id)
+
+    state = json.loads((tmp_path / ".job-state.json").read_text(encoding="utf-8"))
+    assert result.path.exists()
+    assert result.path.name == f"{job_id}_v1.json"
+    assert result.prediction.final_score == SAMPLE_SCORES["final_score"]
+    assert result.created_new_version is False
+    assert state["jobs"][job_id]["status"] == "predicted"
+
+
+def test_predict_workspace_job_new_version_preserves_existing_prediction(tmp_path):
+    job_id = SAMPLE_JOB_DATA["job_id"]
+    (tmp_path / ".job-state.json").write_text(
+        json.dumps(
+            {
+                "jobs": {
+                    job_id: {
+                        "title": SAMPLE_JOB_DATA["role"],
+                        "company": SAMPLE_JOB_DATA["company"],
+                        "status": "scored",
+                        "scores": SAMPLE_SCORES,
+                    }
+                },
+                "active_rubric": SAMPLE_JOB_DATA["rubric_version"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    first = predict_workspace_job(tmp_path, job_id)
+    second = predict_workspace_job(tmp_path, job_id, new_version=True)
+
+    assert first.path.exists()
+    assert second.path.exists()
+    assert second.path.name == f"{job_id}_v2.json"
+    assert second.prediction.version == 2
+    assert second.created_new_version is True

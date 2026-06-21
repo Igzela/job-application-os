@@ -74,13 +74,25 @@ job report
 
 ## Automation Loop Plan
 
-Use `job loop-plan` to write a read-only plan, or `job loop-run --dry-run` to execute non-browser stages (`score`, `predict`, `pack`, `validate`) for pending jobs. Runs write `plan.json`, `events.jsonl`, and `summary.json` under `pipeline_runs/<run_id>/`.
+Use `job loop-plan` to write a read-only plan, or `job loop-run --dry-run` to execute non-browser stages (`score`, `predict`, `pack`, `validate`) for pending jobs. Dry and live runs write `plan.json`, `events.jsonl`, and `summary.json` under `pipeline_runs/<run_id>/`.
 
 Interrupted dry-runs can be resumed:
 
 ```bash
 job loop-run --resume pipeline_runs/<run_id> --dry-run
 ```
+
+Inspect recent dry and live runs:
+
+```bash
+job runs
+job runs --mode live --limit 5
+```
+
+Corrupt run directories, including directories missing `plan.json`, malformed
+event records, or malformed summary counts, are reported individually and do not
+hide healthy runs. Plan-only run directories are shown as `planned`; runs with
+events but no summary are shown as `running`.
 
 See [docs/automation-loop-handoff.md](docs/automation-loop-handoff.md) for implementation notes and run artifact conventions.
 
@@ -127,13 +139,31 @@ Duplicate/contacted state is persisted in `.job-contact-state.json` by job ID, U
 
 Submit results include `submit_phase`, `success_signals`, `page_state`, `extractor`, `recovery_signals`, `page_diagnostics`, and screenshot paths. Success requires a strong signal such as visible `已发送`, greeting text appearing in the chat, expected company chat context, or an already-contacted BOSS state. The submit helper checks for pre-existing success before clicking send to avoid double-send during retries.
 
+Generated Application Packs include `manifest.json` with file hashes, source
+hashes for job, profile, evidence, prediction inputs, and evidence-validation
+summary, including failed validation counts. Pack sources are job-specific
+files plus profile/prediction inputs; unrelated workspace-state edits do not
+invalidate Pack integrity. Pack files must be flat filenames, and Pack
+generation fails if an explicit source file is missing. Workspace live
+submission rejects a missing, source-less, modified, source-stale, or
+unvalidated Pack before connecting to the browser. Live submission also
+requires the Pack manifest validation summary to match workspace state and to
+contain zero unsupported claims. `job doctor` reports blocking workspace,
+Pack, and runtime-state integrity errors separately from non-blocking legacy
+Pack and Run Ledger warnings.
+
+`job validate-pack` also writes the full claim-level report to
+`applications/<job_id>/validation_report.json`, including supported, weak, and
+unsupported claims, missing JD skills, and overclaim risk.
+
 ## Commands
 
 | Command | Description |
 |---------|-------------|
 | `job init` | Create directory structure and starter files |
 | `job demo-seed` | Create sample workspace with profile, rubric, and JD |
-| `job doctor` | Check workspace health |
+| `job doctor` | Check workspace and artifact integrity |
+| `job browser-check [--standalone-browser] [--headless]` | Check BOSS browser connectivity, login/page state, and save diagnostics |
 | `job import --file <path>` | Import raw JD text or markdown |
 | `job paste` | Import JD from stdin |
 | `job score --job <id>` | Score job against profile (6 dimensions) |
@@ -147,6 +177,7 @@ Submit results include `submit_phase`, `success_signals`, `page_state`, `extract
 | `job loop-plan --max-jobs N` | Create a read-only loop plan |
 | `job loop-run --dry-run --max-jobs N` | Run score, predict, pack, validate with structured events |
 | `job loop-run --resume <run_dir> --dry-run` | Resume a prior dry-run, skipping completed stages |
+| `job runs [--mode live|dry_run] [--limit N]` | List recent Run Ledgers and result counts |
 | `job recommend --top N` | Rank scored jobs by composite quality |
 | `job status` | Update STATUS.md with pipeline counts |
 | `job report` | Generate analytics report |
@@ -156,6 +187,7 @@ Submit results include `submit_phase`, `success_signals`, `page_state`, `extract
 | `job plan --opportunity <name>` | Generate execution plan for an opportunity |
 | `job boss-import --keyword <kw>` | Import jobs from BOSS Zhipin via CDP |
 | `job submit --job <id> --platform <plat>` | Semi-automatic application submission |
+| `job submit --job <id> --standalone-browser --headless` | Browser dry-run in an isolated Chromium profile |
 | `job start --keyword <kw> --max-jobs N --port 9222` | Live BOSS pipeline; `--max-jobs` means successful submissions |
 | `job retro-freeform --job <id> --text <text> --lesson <l>` | Record freeform retro with extracted lessons |
 
@@ -173,6 +205,7 @@ Operational scripts:
 
 ```bash
 bash scripts/audit_env.sh
+bash scripts/check_architecture.sh
 bash scripts/local_ci.sh
 MAX_JOBS=5 bash scripts/pipeline_dry_run.sh
 ```
@@ -184,12 +217,14 @@ This system defaults to dry-run/manual workflows, with explicit live BOSS mode:
 - **Dry-run remains non-submitting.** `dry_run.py` fills local HTML forms only. `job loop-run --dry-run` skips browser submission stages.
 - **Loop dry-run skips browser stages.** `job loop-run --dry-run` runs only `score`, `predict`, `pack`, and `validate`.
 - **No anti-detection.** No proxy rotation, CAPTCHA bypass, or scraping evasion.
+- **No fingerprint masking.** Standard Playwright does not spoof user agents, viewport, geolocation, or automation flags.
 - **Evidence-only resume.** `validate-pack` flags any resume claim not traceable to the evidence bank.
 - **Immutable predictions.** Predictions cannot be overwritten — only versioned.
-- **Live BOSS mode is explicit.** `job start` uses a logged-in browser session and writes `pipeline_results.json`; run it only after reviewing config and daily limits.
+- **Live BOSS mode is explicit.** `job start` uses a logged-in browser session and writes a unique Run Ledger under `pipeline_runs/`; run it only after reviewing config and daily limits.
 - **Greeting preflight required.** Unsafe greetings are rewritten once or skipped.
 - **Duplicate guard required.** `.job-contact-state.json` prevents repeat messages by job ID, URL, and company/title.
 - **Submit attempts are diagnosed.** Browser submit helpers persist screenshots, DOM classification, recovery hints, and success signals.
+- **Browser dry-run must prove page readiness.** Submit dry-runs fail when BOSS shows login, verification, access-limit, or blank-page states; CLI exits non-zero so scripts do not treat browser blockers as success.
 - **LLM is optional.** The LLM adapter defaults to a deterministic mock. No API keys required. No network calls in tests.
 - **Scam detection.** `scam-check` evaluates opportunities against red flag patterns before they enter the pipeline.
 

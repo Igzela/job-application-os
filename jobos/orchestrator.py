@@ -1,27 +1,27 @@
 import json
-import random
 import time
 import dataclasses
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .llm.provider import get_llm_adapter
 from .llm.job_analyzer import analyze_match, generate_greeting, check_scam
 from .profile_loader import load_profile, load_evidence_bank
 from .boss_parser import parse_job_list
-from .anti_detect import human_delay, is_business_hours, DailyRateLimiter
+from .automation_policy import DailyRateLimiter, is_business_hours
 from .config import load_config
+from .boss_adapter import human_delay, submit_boss_application
 from .live_pipeline import (
     build_search_keywords,
-    classify_submit_success,
     extract_detail_from_html,
     is_duplicate_job,
-    iter_keyword_candidates,
     load_contact_state,
     merge_detail_page_fields,
     record_contacted_job,
     rewrite_greeting_once,
     validate_greeting,
 )
+from .run_ledger import RunLedger
 
 
 def _job_to_dict(job) -> dict:
@@ -31,14 +31,6 @@ def _job_to_dict(job) -> dict:
     if dataclasses.is_dataclass(job) and not isinstance(job, type):
         return {k: v for k, v in dataclasses.asdict(job).items() if v is not None}
     return dict(job)
-
-
-def _boss_message_sent(page) -> bool:
-    try:
-        sent = page.locator('.status.success:has-text("已发送"), text=已发送')
-        return sent.count() > 0 and sent.first.is_visible(timeout=1000)
-    except Exception:
-        return False
 
 
 def run_full_pipeline(
@@ -56,10 +48,6 @@ def run_full_pipeline(
         投递结果汇总
     """
     state_dir = Path(state_dir)
-    state_file = state_dir / ".job-state.json"
-
-    # 加载状态
-    state = _load_state(state_file)
 
     # 加载profile
     profile = load_profile(state_dir)
@@ -75,10 +63,56 @@ def run_full_pipeline(
     app_config = load_config()
     min_score_to_apply = int(app_config.get("scoring", {}).get("min_score_to_apply", 60))
 
-    # 反检测检查
+    # Safety policy: live actions only during configured operating hours.
     if not dry_run and not is_business_hours():
-        print("⚠️ 当前非工作时间 (8:00-22:00)，为避免检测，仅支持 dry-run 模式")
+        print("⚠️ 当前非工作时间 (8:00-22:00)，仅支持 dry-run 模式")
         dry_run = True
+
+    run_id = datetime.now(timezone.utc).strftime("live-%Y%m%d-%H%M%S-%f")
+    ledger = RunLedger.create(
+        state_dir,
+        mode="dry_run" if dry_run else "live",
+        run_id=run_id,
+        plan={
+            "requested_max_jobs": max_jobs,
+            "search_keyword": search_keyword,
+            "stages": ["search", "analyze", "validate", "submit"],
+        },
+    )
+    ledger.append_event({"event": "run_started", "stage": "search"})
+
+    def finish(summary: dict) -> dict:
+        for result in summary.get("results", []):
+            status = result.get("status", "unknown")
+            job = result.get("job") or {}
+            event = (
+                "stage_succeeded"
+                if status in {"submitted", "dry_run", "already_contacted"}
+                else "job_skipped"
+                if status.startswith("skipped") or status in {
+                    "low_match",
+                    "scam_rejected",
+                    "high_risk",
+                    "greeting_invalid",
+                    "daily_limit",
+                }
+                else "stage_failed"
+            )
+            ledger.append_event(
+                {
+                    "event": event,
+                    "stage": "submit",
+                    "job_id": job.get("job_id") or _job_id_for_artifacts(job),
+                    "status": status,
+                    "error": result.get("error"),
+                    "page_state": result.get("page_state"),
+                    "extractor": result.get("extractor"),
+                    "attempt_path": result.get("attempt_path"),
+                }
+            )
+        summary = {**summary, "run_dir": str(ledger.run_dir)}
+        ledger.write_summary(summary)
+        return summary
 
     # 每日限额检查
     rate_limiter = DailyRateLimiter(
@@ -101,7 +135,15 @@ def run_full_pipeline(
     except Exception as e:
         print(f"❌ 浏览器连接失败: {e}")
         print("   请确保Chrome已启动并开启CDP端口")
-        return {"error": "browser_connect_failed"}
+        ledger.append_event(
+            {
+                "event": "stage_failed",
+                "stage": "browser_connect",
+                "error_class": "browser_connect_failed",
+                "error": str(e),
+            }
+        )
+        return finish({"error": "browser_connect_failed", "results": []})
 
     # Step 2: 搜索职位
     print("🔍 Step 2: 搜索职位...")
@@ -271,15 +313,21 @@ def run_full_pipeline(
                 else:
                     print(f"   ❌ 投递失败: {submit_result.get('status')}")
 
-            # 随机等待（反检测：真正随机，不用 hash）
+            # Apply deterministic pacing between live submissions.
             if not dry_run and submitted < max_jobs and i < len(jobs[:max_per_keyword]) - 1:
-                wait = random.randint(45, 180)
+                wait = int(app_config.get("submit", {}).get("min_delay", 30))
                 print(f"   ⏳ 等待 {wait} 秒...\n")
                 time.sleep(wait)
 
     if total_found == 0:
         print("❌ 未找到职位")
-        return {"error": "no_jobs", "searched_keywords": searched_keywords}
+        return finish(
+            {
+                "error": "no_jobs",
+                "searched_keywords": searched_keywords,
+                "results": results,
+            }
+        )
 
     # 汇总
     summary = {
@@ -297,20 +345,9 @@ def run_full_pipeline(
     print(f"   分析: {summary['analyzed']} 个")
     print(f"   投递: {summary['submitted']} 个")
 
-    # 保存结果
-    results_path = state_dir / "pipeline_results.json"
-    with open(results_path, "w") as f:
-        json.dump(summary, f, ensure_ascii=False, indent=2)
-    print(f"\n📁 结果已保存到: {results_path}")
-
+    summary = finish(summary)
+    print(f"\n📁 结果已保存到: {summary['run_dir']}")
     return summary
-
-
-def _load_state(state_file: Path) -> dict:
-    if state_file.exists():
-        with open(state_file) as f:
-            return json.load(f)
-    return {}
 
 
 def _connect_browser(cdp_port: int, headless: bool):
@@ -347,7 +384,7 @@ def _connect_browser(cdp_port: int, headless: bool):
     # 没有找到已有页面，打开新页面
     page = context.new_page()
     page.goto("https://www.zhipin.com/web/geek/job-recommend")
-    human_delay(3.0, 6.0)  # 反检测：随机延迟
+    human_delay(3.0, 6.0)
     return page
 
 
@@ -377,117 +414,21 @@ def _extract_detail_for_candidate(page, job_dict: dict, keyword: str, app_config
 
 
 def _submit_candidate(page, job_dict: dict, greeting: str, state_dir: Path) -> dict:
-    from .boss_parser import classify_boss_page, scrapling_available
-    from .submitter import _click_chat_button, _click_send, _fill_greeting, _take_screenshot
-
     job_id = job_dict.get("job_id") or _job_id_for_artifacts(job_dict)
-    screenshot_dir = state_dir / "applications" / job_id
-    screenshot_paths: dict[str, str | None] = {}
-    diagnostics: list[dict] = []
-
-    def capture(phase: str) -> dict:
-        html = _safe_page_content(page)
-        page_url = getattr(page, "url", "")
-        title_fn = getattr(page, "title", None)
-        page_title = title_fn() if callable(title_fn) else ""
-        classification = classify_boss_page(html, url=page_url, title=page_title)
-        diag = {
-            "phase": phase,
-            "page_state": classification.state,
-            "extractor": "scrapling" if scrapling_available() else "beautifulsoup",
-            "classification": classification.to_dict(),
-            "recovery": classification.recovery,
-        }
-        diagnostics.append(diag)
-        return diag
-
-    try:
-        screenshot_paths["pre_submit"] = _take_screenshot(page, screenshot_dir / "pre_submit_screenshot.png")
-        before_diag = capture("pre_submit")
-        before_success = _classify_page_success(page, greeting, job_dict.get("company", ""))
-        if before_success.success:
-            screenshot_paths["post_submit"] = _take_screenshot(page, screenshot_dir / "post_submit_screenshot.png")
-            return _submit_record(
-                "submitted",
-                "pre_existing_success",
-                before_success.signals,
-                screenshot_paths,
-                diagnostics,
-                before_diag,
-            )
-
-        if not _click_chat_button(page):
-            diag = capture("chat_button_missing")
-            return _submit_record("no_chat_button", "chat_button", [], screenshot_paths, diagnostics, diag)
-
-        if not _fill_greeting(page, greeting):
-            diag = capture("fill_failed")
-            return _submit_record("fill_failed", "fill", [], screenshot_paths, diagnostics, diag)
-
-        screenshot_paths["pre_send"] = _take_screenshot(page, screenshot_dir / "pre_send_screenshot.png")
-        pre_send_success = _classify_page_success(page, greeting, job_dict.get("company", ""))
-        if pre_send_success.success:
-            screenshot_paths["post_submit"] = _take_screenshot(page, screenshot_dir / "post_submit_screenshot.png")
-            diag = capture("pre_send_success")
-            return _submit_record("submitted", "pre_send_success", pre_send_success.signals, screenshot_paths, diagnostics, diag)
-
-        if not _click_send(page):
-            diag = capture("send_click_failed")
-            return _submit_record("send_failed", "send", [], screenshot_paths, diagnostics, diag)
-
-        screenshot_paths["post_submit"] = _take_screenshot(page, screenshot_dir / "post_submit_screenshot.png")
-        post_diag = capture("post_send")
-        success = _classify_page_success(page, greeting, job_dict.get("company", ""))
-        if success.success:
-            print(f"   ✅ 投递成功")
-            return _submit_record("submitted", "post_send", success.signals, screenshot_paths, diagnostics, post_diag)
-        return _submit_record("send_unverified", "post_send", [], screenshot_paths, diagnostics, post_diag)
-    except Exception as exc:
-        screenshot_paths["error"] = _take_screenshot(page, screenshot_dir / "error_screenshot.png")
-        diag = capture("error")
-        record = _submit_record("error", "exception", [], screenshot_paths, diagnostics, diag)
-        record["error"] = str(exc)
-        return record
-
-
-def _submit_record(
-    status: str,
-    phase: str,
-    success_signals: list[str],
-    screenshot_paths: dict[str, str | None],
-    diagnostics: list[dict],
-    last_diag: dict,
-) -> dict:
-    recovery_signals = [
-        diag.get("recovery")
-        for diag in diagnostics
-        if diag.get("recovery")
-    ]
-    return {
-        "status": status,
-        "submit_phase": phase,
-        "success_signals": success_signals,
-        "screenshot_paths": {k: v for k, v in screenshot_paths.items() if v},
-        "page_state": last_diag.get("page_state"),
-        "extractor": last_diag.get("extractor"),
-        "recovery_signals": list(dict.fromkeys(recovery_signals)),
-        "page_diagnostics": diagnostics,
-    }
-
-
-def _safe_page_content(page) -> str:
-    try:
-        return page.content()
-    except Exception:
-        return ""
-
-
-def _classify_page_success(page, greeting: str, expected_company: str):
-    success = classify_submit_success(_safe_page_content(page), greeting, expected_company)
-    if _boss_message_sent(page) and "sent_state" not in success.signals:
-        signals = [*success.signals, "sent_state"]
-        return type(success)(success=True, signals=signals, diagnostics={**success.diagnostics, "visible_sent_state": True})
-    return success
+    job_url = job_dict.get("url") or job_dict.get("link", "")
+    result = submit_boss_application(
+        page,
+        job_id=job_id,
+        job_url=job_url,
+        company=job_dict.get("company", ""),
+        greeting=greeting,
+        state_dir=state_dir,
+        dry_run=False,
+        confirm=True,
+        validated=True,
+        navigate=False,
+    )
+    return result.to_pipeline_record()
 
 
 def _job_id_for_artifacts(job_dict: dict) -> str:
@@ -502,7 +443,7 @@ def _search_jobs(page, keyword: str) -> list[dict]:
     if keyword and keyword not in current_url:
         url = f"https://www.zhipin.com/web/geek/job?query={keyword}&city=101280600"
         page.goto(url)
-        human_delay(4.0, 8.0)  # 反检测：随机延迟替代固定 5 秒
+        human_delay(4.0, 8.0)
     elif "zhipin.com" in current_url:
         print(f"   📄 使用当前页面: {current_url[:80]}...")
         human_delay(2.0, 4.0)  # 短暂等待页面加载

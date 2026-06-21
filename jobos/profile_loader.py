@@ -9,6 +9,51 @@ import yaml
 _PROFILE_FILES = ("base.yaml", "education.yaml", "skills.yaml", "availability.yaml")
 
 
+def _normalized_identity(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip()).casefold()
+
+
+def _year(value: object) -> str:
+    match = re.search(r"\b(19|20)\d{2}\b", str(value or ""))
+    return match.group(0) if match else ""
+
+
+def validate_profile_consistency(profile: dict) -> list[str]:
+    """Return conflicts between base identity fields and primary education."""
+    education = profile.get("education")
+    if not isinstance(education, list) or not education:
+        return []
+    primary = education[0]
+    if not isinstance(primary, dict):
+        return ["education[0] must be an object"]
+
+    errors: list[str] = []
+    pairs = (
+        ("school", profile.get("school"), primary.get("institution")),
+        ("major", profile.get("major"), primary.get("major")),
+    )
+    for label, base_value, education_value in pairs:
+        base_normalized = _normalized_identity(base_value)
+        education_normalized = _normalized_identity(education_value)
+        if (
+            base_normalized
+            and education_normalized
+            and base_normalized != education_normalized
+        ):
+            errors.append(
+                f"{label} conflicts: {base_value!s} != {education_value!s}"
+            )
+
+    base_year = _year(profile.get("graduation_date"))
+    education_year = _year(primary.get("graduation_date"))
+    if base_year and education_year and base_year != education_year:
+        errors.append(
+            "graduation year conflicts: "
+            f"{base_year} != {education_year}"
+        )
+    return errors
+
+
 def load_profile(base_dir: str | Path) -> dict:
     """Merge base.yaml, education.yaml, skills.yaml, availability.yaml into one dict.
 

@@ -2,7 +2,7 @@
 
 import pytest
 
-from jobos.scorer import score_job
+from jobos.scorer import score_job, score_workspace_job
 
 
 # ---------------------------------------------------------------------------
@@ -358,3 +358,36 @@ class TestEdgeCases:
         r1 = _score()
         r2 = _score()
         assert r1 == r2
+
+
+def test_score_workspace_job_updates_state(tmp_path):
+    import json
+
+    import yaml
+
+    job_id = "job-score-workflow"
+    (tmp_path / "jobs" / "normalized").mkdir(parents=True)
+    (tmp_path / "jobs" / "normalized" / f"{job_id}.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "job_id": job_id,
+                "title": "Backend Engineer",
+                "company": "Acme",
+                "description": "Build APIs with Python.",
+                "skills": ["Python"],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / ".job-state.json").write_text(
+        json.dumps({"jobs": {job_id: {"title": "Backend Engineer", "company": "Acme", "status": "imported"}}}) + "\n",
+        encoding="utf-8",
+    )
+
+    scores = score_workspace_job(tmp_path, job_id)
+
+    state = json.loads((tmp_path / ".job-state.json").read_text(encoding="utf-8"))
+    assert "final_score" in scores
+    assert state["jobs"][job_id]["status"] == "scored"
+    assert state["jobs"][job_id]["scores"]["final_score"] == scores["final_score"]

@@ -55,7 +55,15 @@ def _make_jobs(n: int, status: str = "imported", prefix: str = "job") -> dict:
 class TestLoadState:
     def test_missing_file_returns_defaults(self, state_dir: Path) -> None:
         state = _load_state(state_dir)
-        assert state == {"jobs": {}, "active_rubric": "unknown", "rubric_history": []}
+        assert state == {
+            "schema_version": 1,
+            "jobs": {},
+            "active_rubric": "unknown",
+            "rubric_history": [],
+            "opportunities": [],
+            "active_opportunity": None,
+            "lessons": [],
+        }
 
     def test_reads_existing_file(self, state_dir: Path) -> None:
         _write_state(state_dir, {"jobs": {"a": {}}, "active_rubric": "v2"})
@@ -218,7 +226,7 @@ class TestUpdateStatusWritesFile:
 
 
 # ---------------------------------------------------------------------------
-# Artifact counts (predictions/ and packs/ subdirs)
+# Artifact counts (predictions/ and applications/ subdirs)
 # ---------------------------------------------------------------------------
 
 
@@ -233,7 +241,7 @@ class TestArtifactCounts:
         assert "Predictions on disk: **3**" in md
 
     def test_packs_appear_when_present(self, state_dir: Path) -> None:
-        pack_dir = state_dir / "packs"
+        pack_dir = state_dir / "applications"
         pack_dir.mkdir()
         for i in range(2):
             (pack_dir / f"pack-{i}").mkdir()

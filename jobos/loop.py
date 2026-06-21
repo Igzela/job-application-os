@@ -9,67 +9,51 @@ from __future__ import annotations
 
 import json
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .pipeline import (
+    DRY_RUN_STAGES as PIPELINE_DRY_RUN_STAGES,
+    PIPELINE_STAGES,
+    action_for_job,
+    remaining_dry_run_stages,
+    transition_job,
+)
+from .run_ledger import (
+    PLAN_FILENAME,
+    RunLedger,
+)
+from .runtime_state import load_json_state, save_json_state
+from .workspace import (
+    PIPELINE_RUNS_DIR,
+    application_dir,
+    jobs_normalized_dir,
+    load_state,
+    pipeline_runs_dir,
+    predictions_dir,
+    save_state,
+)
 
-STATE_FILENAME = ".job-state.json"
-RUNS_DIR = "pipeline_runs"
 RUN_ID_FORMAT = "%Y%m%d-%H%M%S"
-PLAN_FILENAME = "plan.json"
-EVENTS_FILENAME = "events.jsonl"
-SUMMARY_FILENAME = "summary.json"
-STAGES = ("score", "predict", "pack", "validate", "submit", "retro")
-DRY_RUN_STAGES = ("score", "predict", "pack", "validate")
+STAGES = PIPELINE_STAGES
+DRY_RUN_STAGES = PIPELINE_DRY_RUN_STAGES
 TERMINAL_SUCCESS_EVENTS = {"stage_succeeded", "job_skipped"}
 
 
 def _load_state(state_dir: Path) -> dict[str, Any]:
-    state_path = state_dir / STATE_FILENAME
-    if not state_path.exists():
-        return {"jobs": {}}
-    return json.loads(state_path.read_text(encoding="utf-8"))
+    return load_state(state_dir)
 
 
 def _write_state(state_dir: Path, state: dict[str, Any]) -> None:
-    (state_dir / STATE_FILENAME).write_text(
-        json.dumps(state, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    save_state(state_dir, state)
 
 
 def default_run_dir(state_dir: str | Path, now: datetime | None = None) -> Path:
     """Return the conventional run directory for a new pipeline run."""
     if now is None:
         now = datetime.now()
-    return Path(state_dir) / RUNS_DIR / now.strftime(RUN_ID_FORMAT)
-
-
-def _job_action(job_id: str, job: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
-    status = job.get("status", "imported")
-
-    if status == "imported":
-        return "score", {"action": "score"}
-    if status == "scored":
-        return "predict", {"action": "predict"}
-    if status == "predicted":
-        return "pack", {"action": "pack"}
-    if status == "packed":
-        return "validate", {"action": "validate-pack"}
-    if status in ("validated", "ready_to_submit"):
-        return "submit", {"action": "submit"}
-    if status == "submitted":
-        retro = job.get("retro") or {}
-        missing = [
-            window
-            for window in ("status_3d", "status_14d", "status_30d")
-            if retro.get(window) is None
-        ]
-        if missing:
-            return "retro", {"action": "retro", "missing_windows": missing}
-
-    return None
+    return pipeline_runs_dir(state_dir) / now.strftime(RUN_ID_FORMAT)
 
 
 def build_loop_plan(state_dir: str | Path, max_jobs: int | None = 10) -> dict[str, Any]:
@@ -84,16 +68,16 @@ def build_loop_plan(state_dir: str | Path, max_jobs: int | None = 10) -> dict[st
     candidates: list[tuple[int, str, dict[str, Any]]] = []
 
     for job_id, job in sorted(state.get("jobs", {}).items()):
-        planned = _job_action(job_id, job)
+        planned = action_for_job(job)
         if planned is None:
             continue
-        stage, action_info = planned
+        stage = planned.stage
         action = {
             "job_id": job_id,
             "title": job.get("title", ""),
             "company": job.get("company", ""),
             "status": job.get("status", "imported"),
-            **action_info,
+            **planned.to_action_fields(),
         }
         candidates.append((STAGES.index(stage), stage, action))
 
@@ -110,8 +94,8 @@ def build_loop_plan(state_dir: str | Path, max_jobs: int | None = 10) -> dict[st
             "by_stage": {stage: len(actions) for stage, actions in stages.items()},
         },
         "run_directory": {
-            "root": RUNS_DIR,
-            "pattern": f"{RUNS_DIR}/YYYYMMDD-HHMMSS/",
+            "root": PIPELINE_RUNS_DIR,
+            "pattern": f"{PIPELINE_RUNS_DIR}/YYYYMMDD-HHMMSS/",
             "files": ["plan.json", "events.jsonl", "summary.json", "artifacts/"],
         },
     }
@@ -133,15 +117,8 @@ def write_loop_plan(
 
     plan = build_loop_plan(state_dir, max_jobs=max_jobs)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        json.dumps(plan, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    save_json_state(output_path, plan)
     return output_path
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _resolve_run_dir(state_dir: Path, output: str | Path | None) -> Path:
@@ -187,29 +164,10 @@ def classify_error(exc: BaseException | str) -> str:
     return "unknown"
 
 
-def _append_event(events_path: Path, event: dict[str, Any]) -> dict[str, Any]:
-    event = {"timestamp": _utc_now(), **event}
-    events_path.parent.mkdir(parents=True, exist_ok=True)
-    with events_path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
-    return event
-
-
-def _load_events(run_dir: Path) -> list[dict[str, Any]]:
-    events_path = run_dir / EVENTS_FILENAME
-    if not events_path.exists():
-        return []
-    events = []
-    for line in events_path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            events.append(json.loads(line))
-    return events
-
-
 def _load_job_data(state_dir: Path, job_id: str, job_entry: dict[str, Any]) -> dict[str, Any]:
     import yaml
 
-    normalized = state_dir / "jobs" / "normalized"
+    normalized = jobs_normalized_dir(state_dir)
     yaml_path = normalized / f"{job_id}.yaml"
     json_path = normalized / f"{job_id}.json"
     if yaml_path.exists():
@@ -248,7 +206,7 @@ def _load_rubric(state_dir: Path, profile: dict[str, Any]) -> dict[str, Any]:
 
 
 def _next_prediction_version(state_dir: Path, job_id: str) -> int:
-    existing = sorted((state_dir / "predictions").glob(f"{job_id}_v*.json"))
+    existing = sorted(predictions_dir(state_dir).glob(f"{job_id}_v*.json"))
     return len(existing) + 1
 
 
@@ -265,7 +223,7 @@ def _run_score(state_dir: Path, job_id: str) -> dict[str, Any]:
     rubric = _load_rubric(state_dir, profile)
     job_data = _load_job_data(state_dir, job_id, jobs[job_id])
     scores = score_job(job_data, profile, evidence, rubric)
-    jobs[job_id]["status"] = "scored"
+    transition_job(jobs[job_id], "scored")
     jobs[job_id]["scores"] = {
         key: value for key, value in scores.items() if key not in ("skipped", "skip_reason")
     }
@@ -287,7 +245,7 @@ def _run_predict(state_dir: Path, job_id: str) -> dict[str, Any]:
         raise KeyError(f"Job {job_id} has no final_score")
 
     try:
-        prediction = load_prediction(job_id, state_dir / "predictions")
+        prediction = load_prediction(job_id, predictions_dir(state_dir))
     except FileNotFoundError:
         profile = load_profile(str(state_dir))
         version = _next_prediction_version(state_dir, job_id)
@@ -296,45 +254,28 @@ def _run_predict(state_dir: Path, job_id: str) -> dict[str, Any]:
             scores,
             profile,
         )
-        save_prediction(prediction, state_dir / "predictions")
+        save_prediction(prediction, predictions_dir(state_dir))
 
-    jobs[job_id]["status"] = "predicted"
+    transition_job(jobs[job_id], "predicted")
     _write_state(state_dir, state)
     return {"decision": prediction.decision, "version": prediction.version}
 
 
 def _run_pack(state_dir: Path, job_id: str) -> dict[str, Any]:
-    from .pack_generator import generate_pack, validate_pack
-    from .predictor import load_prediction
-    from .profile_loader import load_evidence_bank, load_profile
+    from .pack_generator import generate_workspace_pack
 
-    state = _load_state(state_dir)
-    jobs = state.setdefault("jobs", {})
-    if job_id not in jobs:
-        raise KeyError(f"Job {job_id} not found in state")
-    job_data = _load_job_data(state_dir, job_id, jobs[job_id])
-    prediction = load_prediction(job_id, state_dir / "predictions").to_dict()
-    profile = load_profile(str(state_dir))
-    evidence = load_evidence_bank(str(state_dir))
-    pack = generate_pack(job_data, prediction, profile, evidence)
-    warnings = validate_pack(pack, evidence)
-
-    pack_dir = state_dir / "applications" / job_id
-    pack_dir.mkdir(parents=True, exist_ok=True)
-    for filename, content in pack.files.items():
-        (pack_dir / filename).write_text(content, encoding="utf-8")
-
-    jobs[job_id]["status"] = "packed"
-    jobs[job_id]["pack_warnings"] = warnings
-    _write_state(state_dir, state)
-    return {"files": sorted(pack.files), "warnings": len(warnings)}
+    result = generate_workspace_pack(state_dir, job_id)
+    return {
+        "files": sorted(result.pack.files),
+        "warnings": len(result.warnings),
+    }
 
 
 def _run_validate(state_dir: Path, job_id: str) -> dict[str, Any]:
     from .evidence_markers import generate_evidence_report
     from .profile_loader import load_evidence_bank
 
-    pack_dir = state_dir / "applications" / job_id
+    pack_dir = application_dir(state_dir, job_id)
     if not pack_dir.exists():
         raise FileNotFoundError(f"No application pack for {job_id}")
     pack_files = {
@@ -351,7 +292,7 @@ def _run_validate(state_dir: Path, job_id: str) -> dict[str, Any]:
     report = generate_evidence_report(pack_files, evidence, job_data)
     if report.get("unsupported"):
         raise ValueError(f"Validation failed: {len(report['unsupported'])} unsupported claims")
-    jobs[job_id]["status"] = "validated"
+    transition_job(jobs[job_id], "validated")
     jobs[job_id]["validation"] = {
         "supported": len(report.get("supported", [])),
         "weak": len(report.get("weak", [])),
@@ -370,15 +311,7 @@ STAGE_RUNNERS = {
 
 
 def _remaining_stages(status: str) -> list[str]:
-    if status == "imported":
-        return ["score", "predict", "pack", "validate"]
-    if status == "scored":
-        return ["predict", "pack", "validate"]
-    if status == "predicted":
-        return ["pack", "validate"]
-    if status == "packed":
-        return ["validate"]
-    return []
+    return remaining_dry_run_stages(status)
 
 
 def _planned_jobs_for_dry_run(plan: dict[str, Any]) -> list[str]:
@@ -491,21 +424,22 @@ def run_loop(
         plan_path = run_dir / PLAN_FILENAME
         if not plan_path.exists():
             raise FileNotFoundError(f"No plan.json found in resume dir: {run_dir}")
-        plan = json.loads(plan_path.read_text(encoding="utf-8"))
-        existing_events = _load_events(run_dir)
+        ledger = RunLedger.open(run_dir)
+        plan = load_json_state(plan_path, {})
+        existing_events = ledger.load_events()
         resume_state = _resume_stage_state(existing_events)
     else:
         run_dir = _resolve_run_dir(state_dir, output)
         plan = build_loop_plan(state_dir, max_jobs=max_jobs)
-        run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / PLAN_FILENAME).write_text(
-            json.dumps(plan, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
-            encoding="utf-8",
+        ledger = RunLedger(
+            run_dir=run_dir,
+            mode="dry_run",
+            run_id=run_dir.name,
         )
+        ledger.write_plan(plan)
         existing_events = []
         resume_state = {}
 
-    events_path = run_dir / EVENTS_FILENAME
     planned_jobs = _planned_jobs_for_dry_run(plan)
     if max_jobs is not None:
         planned_jobs = planned_jobs[:max_jobs]
@@ -514,8 +448,7 @@ def run_loop(
         state = _load_state(state_dir)
         job_entry = state.get("jobs", {}).get(job_id)
         if job_entry is None:
-            _append_event(
-                events_path,
+            ledger.append_event(
                 {
                     "event": "stage_failed",
                     "job_id": job_id,
@@ -529,8 +462,7 @@ def run_loop(
         stages = _remaining_stages(job_entry.get("status", "imported"))
         extraction_context = _job_extraction_context(job_entry)
         if not stages:
-            _append_event(
-                events_path,
+            ledger.append_event(
                 {
                     "event": "job_skipped",
                     "job_id": job_id,
@@ -543,8 +475,7 @@ def run_loop(
         for stage in stages:
             previous = resume_state.get((job_id, stage))
             if previous == "stage_succeeded":
-                _append_event(
-                    events_path,
+                ledger.append_event(
                     {
                         "event": "job_skipped",
                         "job_id": job_id,
@@ -555,20 +486,17 @@ def run_loop(
                 )
                 continue
             if previous == "stage_failed":
-                _append_event(
-                    events_path,
+                ledger.append_event(
                     {"event": "job_retried", "job_id": job_id, "stage": stage, **extraction_context},
                 )
 
-            _append_event(
-                events_path,
+            ledger.append_event(
                 {"event": "stage_started", "job_id": job_id, "stage": stage, **extraction_context},
             )
             try:
                 result = STAGE_RUNNERS[stage](state_dir, job_id)
             except Exception as exc:
-                _append_event(
-                    events_path,
+                ledger.append_event(
                     {
                         "event": "stage_failed",
                         "job_id": job_id,
@@ -581,8 +509,7 @@ def run_loop(
                 )
                 break
             else:
-                _append_event(
-                    events_path,
+                ledger.append_event(
                     {
                         "event": "stage_succeeded",
                         "job_id": job_id,
@@ -592,10 +519,7 @@ def run_loop(
                     },
                 )
 
-    events = _load_events(run_dir)
+    events = ledger.load_events()
     summary = _summarize_events(run_dir, events)
-    (run_dir / SUMMARY_FILENAME).write_text(
-        json.dumps(summary, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    ledger.write_summary(summary)
     return summary

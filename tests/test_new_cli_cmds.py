@@ -9,6 +9,11 @@ from unittest.mock import patch
 import pytest
 
 from jobos.cli import _cmd_scam_check, _cmd_find, _cmd_plan
+from jobos.opportunity_workflows import (
+    find_workspace_opportunities,
+    plan_workspace_opportunity,
+    record_scam_check,
+)
 
 
 class _Args:
@@ -25,6 +30,20 @@ class _Args:
 
 class TestScamCheckHappy:
     """scam-check with a clean opportunity writes to state."""
+
+    def test_record_scam_check_writes_feasible(self, tmp_path):
+        state_path = tmp_path / ".job-state.json"
+        state_path.write_text(json.dumps({"jobs": {}, "opportunities": []}))
+
+        result = record_scam_check(
+            tmp_path,
+            "Content Creator",
+            "Write blog posts about tech",
+        )
+
+        state = json.loads(state_path.read_text())
+        assert result.written is True
+        assert len(state["opportunities"]) == 1
 
     def test_feasible_verdict_printed(self, tmp_path, capsys):
         state_path = tmp_path / ".job-state.json"
@@ -71,6 +90,19 @@ class TestScamCheckHighRisk:
 class TestFind:
     """find command loads profile and writes opportunities."""
 
+    def test_find_workspace_opportunities_writes_state(self, tmp_state_dir, sample_profile):
+        state_path = tmp_state_dir / ".job-state.json"
+        profile_dir = tmp_state_dir / "profile"
+        profile_dir.mkdir(exist_ok=True)
+        import yaml
+        (profile_dir / "base.yaml").write_text(yaml.dump(sample_profile))
+
+        result = find_workspace_opportunities(tmp_state_dir)
+
+        state = json.loads(state_path.read_text())
+        assert result.written == len(result.opportunities)
+        assert len(state["opportunities"]) == result.written
+
     def test_find_writes_opportunities(self, tmp_state_dir, sample_profile):
         state_path = tmp_state_dir / ".job-state.json"
         # Write profile files
@@ -115,6 +147,38 @@ class TestFindWithDirection:
 
 class TestPlan:
     """plan command finds opportunity by name and creates an ActionPlan."""
+
+    def test_plan_workspace_opportunity_writes_active_plan(self, tmp_state_dir, sample_profile):
+        state_path = tmp_state_dir / ".job-state.json"
+        profile_dir = tmp_state_dir / "profile"
+        profile_dir.mkdir(exist_ok=True)
+        import yaml
+        (profile_dir / "base.yaml").write_text(yaml.dump(sample_profile))
+        state = json.loads(state_path.read_text())
+        state["opportunities"] = [{
+            "id": "opp-content-12345678",
+            "name": "AI-Assisted Content Monetization",
+            "category": "content",
+            "for_tier": "T1",
+            "money_source": "Platform ad revenue share",
+            "verdict": "clean",
+            "verify_first_step": "Post 5 articles",
+            "income_expectation": "500-5000 CNY/month",
+            "reasoning_chain": "Low barrier",
+            "cross_verification": "Check platform thresholds",
+            "status": "candidate",
+            "found_at": "2026-06-10T00:00:00Z",
+        }]
+        state_path.write_text(json.dumps(state, indent=2) + "\n")
+
+        result = plan_workspace_opportunity(
+            tmp_state_dir,
+            "AI-Assisted Content Monetization",
+        )
+
+        state = json.loads(state_path.read_text())
+        assert result.plan.opportunity_name == "AI-Assisted Content Monetization"
+        assert state["active_opportunity"]["opportunity_name"] == result.plan.opportunity_name
 
     def test_plan_writes_active_opportunity(self, tmp_state_dir, sample_profile):
         state_path = tmp_state_dir / ".job-state.json"
