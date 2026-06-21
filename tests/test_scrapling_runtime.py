@@ -57,8 +57,30 @@ def test_dynamic_fetch_reports_missing_browser(monkeypatch) -> None:
         "jobos.scrapling_runtime._load_fetchers",
         lambda: (HttpFetcher, MissingBrowser),
     )
+    monkeypatch.setattr(
+        "jobos.scrapling_runtime._validate_browser_path",
+        lambda: "/tmp/chromium",
+    )
 
     with pytest.raises(ScraplingCapabilityError, match="scrapling install"):
+        fetch_page("https://example.test", engine="dynamic")
+
+
+def test_dynamic_fetch_reports_missing_chromium(tmp_path: Path, monkeypatch) -> None:
+    class DynamicFetcher:
+        adaptive = False
+
+    class HttpFetcher:
+        adaptive = False
+
+    missing_chromium = tmp_path / "chromium"
+    monkeypatch.setattr(
+        "jobos.scrapling_runtime._load_fetchers",
+        lambda: (HttpFetcher, DynamicFetcher),
+    )
+    monkeypatch.setattr("jobos.browser.CHROMIUM_PATH", str(missing_chromium))
+
+    with pytest.raises(ScraplingCapabilityError, match="Chromium not found"):
         fetch_page("https://example.test", engine="dynamic")
 
 
